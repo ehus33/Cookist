@@ -19,7 +19,7 @@ Requires Node.js 22.13 or later, a Stripe account with Connect enabled, and [Str
 5. Add a test seller, generate a Stripe onboarding link, and complete Connect test onboarding. Verify the seller's details independently, then approve them and add a meal. An approved seller appears in the menu but checkout is blocked until Stripe reports charges and payouts enabled.
 6. Visit `http://localhost:3000` and use a [Stripe test card](https://docs.stripe.com/testing). The Stripe CLI must keep running so paid test orders appear in admin.
 
-Run `yarn test` for automated tests or `yarn build` for a TypeScript check. The SQLite database is stored locally in `cookist.sqlite` by default; `.env` and database files are ignored by Git.
+The storefront and admin UI are in `src/public`: `pages` compose the UI, `components` hold page sections, and `hooks` manage state and requests. HTML files are entry-point shells. `yarn build` type-checks and bundles the React/TSX frontend with esbuild. `yarn test` runs API and UI tests and enforces 95% overall line, statement, function, and branch coverage across `src`; see `coverage/lcov-report/index.html` for details. The SQLite database is stored locally in `cookist.sqlite` by default; `.env` and database files are ignored by Git.
 
 ## Launch blockers
 
