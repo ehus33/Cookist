@@ -1,0 +1,23 @@
+{
+  "name": "cookist",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A test-mode marketplace for food prepared in approved shared kitchens.",
+  "type": "module",
+  "engines": { "node": ">=22.13" },
+  "scripts": {
+    "build": "tsc",
+    "start": "yarn build && node --experimental-sqlite dist/server.js",
+    "test": "yarn build && node --experimental-sqlite --test"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "stripe": "^17.7.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.13.0",
+    "typescript": "latest"
+  }
+}
