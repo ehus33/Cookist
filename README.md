@@ -13,6 +13,21 @@ courier locations are manually simulated. Do not expose this service publicly or
 real customer/card data. Changing the delivery address does not change the seeded
 Seattle catalog, illustrative distances, or travel estimates.
 
+### Experimental authentication backend
+
+The `feature/signIn` work is incomplete: no client can sign in with Cognito yet,
+and no Cognito user pool is provisioned. Do not enable this mode on the running
+demo or expose it publicly.
+
+The core service can be started for backend testing with `COOKIST_AUTH_MODE=cognito`,
+`COOKIST_COGNITO_ISSUER=https://cognito-idp.<region>.amazonaws.com/<pool-id>`,
+and `COOKIST_COGNITO_CLIENT_IDS` set to a comma-separated list of public app
+client IDs. The service validates Cognito access tokens and treats each subject
+as a separate customer. It disables demo session creation and demo accounts;
+merchant and courier access are not implemented. Existing demo orders are not
+linked to Cognito identities. The default `demo` mode remains unchanged and is
+not authentication. Do not consider this backend mode production-ready.
+
 ## Architecture
 
 ```text
@@ -87,7 +102,7 @@ Native apps are unchanged. No provider has been chosen for the optional services
 | Email | `EMAIL_PROVIDER`, `EMAIL_API_KEY`, `EMAIL_FROM` | Transactional provider, sender verification and delivery retries |
 | SMS | `SMS_PROVIDER`, `SMS_API_KEY`, `SMS_FROM` | Provider, opt-in and delivery handling |
 | Push | `PUSH_PROVIDER`, `PUSH_CREDENTIALS_FILE` | Server credentials file outside Git, device registration and platform setup |
-| Production auth | `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_AUDIENCE` | OIDC verification, roles/ownership, SPA and native PKCE flows |
+| Production auth | `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_AUDIENCE` | Reserved only; the experimental Cognito backend uses the separate `COOKIST_COGNITO_*` settings above |
 
 OpenFreeMap supplies tiles/styles, not address search, routing, or location
 collection. Map attribution and provider usage terms must be respected when wired.

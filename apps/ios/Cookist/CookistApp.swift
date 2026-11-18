@@ -24,6 +24,7 @@ private let cream = Color(red: 1, green: 0.97, blue: 0.94)
         .safeAreaInset(edge: .top) {
             VStack(spacing: 2) {
                 HStack { Text("Cookist").font(.largeTitle.bold()).foregroundStyle(orange); Spacer(); Text(model.role).font(.caption) }
+                Text("A Machi service").font(.caption.weight(.semibold)).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
                 Text("Good food. Your neighborhood.").font(.caption).frame(maxWidth: .infinity, alignment: .leading)
                 if model.busy { ProgressView().frame(maxWidth: .infinity) }
             }.padding(.horizontal).padding(.bottom, 8).background(cream)

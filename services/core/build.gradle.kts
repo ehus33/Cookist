@@ -7,6 +7,7 @@ repositories { mavenCentral() }
 
 dependencies {
     implementation("com.fasterxml.jackson.core:jackson-databind:2.18.3")
+    implementation("org.bitbucket.b_c:jose4j:0.9.7")
     implementation("org.xerial:sqlite-jdbc:3.49.1.0")
     implementation("org.slf4j:slf4j-simple:2.0.17")
     testImplementation(kotlin("test"))
