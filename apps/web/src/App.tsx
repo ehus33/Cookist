@@ -4,6 +4,7 @@ import { Checkout, Modal, OrderCard, StoreCard, StoreMenu } from './components';
 import { changeQuantity, isCartMap, isSession, money } from './domain';
 import { useOrders } from './hooks';
 import { Icon } from './Icon';
+import { EstablishmentDirectory } from './EstablishmentDirectory';
 import type { Account, Accounts, Cart, Order, Role, SearchResult, Session, Status, Store } from './types';
 
 const categories = [
@@ -216,6 +217,7 @@ export function App() {
               : <><div className={`store-grid ${searching ? 'is-searching' : ''}`} aria-busy={searching}>{result.stores.map((store, index) => <StoreCard key={store.id} store={store} index={index} onOpen={() => { setSelectedStoreId(store.id); setFocused(false); }} />)}</div>
                 {!searching && result.stores.length === 0 && <div className="empty-state"><span className="empty-emoji" aria-hidden="true">🔎</span><h3>No kitchens found. A new craving?</h3><p>Try pizza, a dish like miso, or clear a filter.</p><button className="secondary" onClick={() => { setQuery(''); setSubmittedQuery(''); setCuisine('All'); setLowFee(false); setOpenOnly(false); }}>Reset search</button></div>}</>}
           </section>
+          <EstablishmentDirectory />
           <section className="neighborhood-note"><span className="note-icon"><Icon name="leaf" size={27} /></span><div><h3>A good neighborhood starts at the table.</h3><p>Independent kitchens. Familiar faces. A fresh reason to eat local.</p></div><span className="note-handwriting">here’s to good taste.</span></section>
         </>)}
         {isOrdersView && <>
@@ -229,7 +231,7 @@ export function App() {
           {session && <div className="live-heading"><h2>{role === 'courier' ? 'Available & assigned deliveries' : role === 'merchant' ? 'Incoming & recent orders' : 'Fresh from your kitchens'}</h2><span><i /> Updates every 4 seconds</span></div>}
           {ordersError && <div className="notice error" role="alert">{ordersError} <button className="text-button" onClick={() => { setSession(null); discover(); }}>End session & sign in again</button></div>}
           {session && !ordersError && !ordersLoading && orders.length === 0 && <div className="empty-state"><span className="empty-emoji" aria-hidden="true">{role === 'courier' ? '🚲' : '🍽️'}</span><h3>{role === 'courier' ? 'The next delicious delivery is on its way.' : 'Nothing on the table just yet.'}</h3><p>{role === 'courier' ? 'Ask a kitchen to mark an order ready, then claim it here.' : role === 'merchant' ? 'Customer orders will appear here as soon as they are placed.' : 'Find a local favorite and make it your first order.'}</p>{role === 'customer' && <button className="primary" onClick={discover}>Find something delicious <Icon name="arrow" size={16} /></button>}</div>}
-          <div className="orders-list">{session && orders.map(order => <OrderCard key={order.id} order={order} role={role} actorId={session.actorId} store={catalog.find(store => store.id === order.storeId)} busy={busy} onStatus={orderStatus}
+          <div className="orders-list">{session && orders.map(order => <OrderCard key={order.id} order={order} role={role} actorId={session.actorId} session={session} store={catalog.find(store => store.id === order.storeId)} busy={busy} onStatus={orderStatus}
             onClaim={order => void mutate(`/api/orders/${order.id}/claim`, {}, 'Delivery claimed. The neighborhood is counting on you.')}
             onLocation={(order, location) => void mutate(`/api/orders/${order.id}/location`, location, 'Simulated location shared.')} />)}</div>
         </>}

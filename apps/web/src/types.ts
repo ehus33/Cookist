@@ -28,7 +28,7 @@ export interface Order {
   totals: Totals; status: Status;
   payment: { id: string; status: 'captured' | 'refunded'; method: 'simulated' };
   courierId: string | null; courierName: string | null;
-  location: { lat: number; lng: number; updatedAt: string } | null;
+  location: { lat: number; lng: number; updatedAt: string; source?: 'live' } | null;
   createdAt: string; updatedAt: string;
   events: { status: Status; at: string; note: string }[];
 }

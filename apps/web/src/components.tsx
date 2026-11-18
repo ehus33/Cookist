@@ -3,6 +3,8 @@ import type { FormEvent, ReactNode } from 'react';
 import { api, errorMessage } from './api';
 import { Icon } from './Icon';
 import { cartTotals, journey, money, nextStatuses, statusLabels } from './domain';
+import { TrackingMap } from './TrackingMap';
+import { CourierLocationControls } from './CourierLocationControls';
 import type { Cart, Order, Role, Session, Store } from './types';
 
 export function Modal({ title, children, onClose, locked = false }: { title: string; children: ReactNode; onClose: () => void; locked?: boolean }) {
@@ -145,25 +147,15 @@ const actionLabels: Partial<Record<Order['status'], string>> = {
 };
 
 export function Tracking({ order, store }: { order: Order; store?: Store }) {
-  const origin = { lat: store?.lat ?? 47.607, lng: store?.lng ?? -122.337 };
-  const location = order.location ?? origin;
-  const point = {
-    left: `${Math.min(88, Math.max(12, 50 + (location.lng + 122.333) * 1700))}%`,
-    top: `${Math.min(82, Math.max(18, 50 - (location.lat - 47.607) * 2000))}%`,
-  };
   return <div className="tracking">
-    <div className="tracking-map" aria-label="Illustrated delivery tracker, not a geographic map">
-      <div className="map-park" /><div className="map-water" /><span className="map-street street-one">NEIGHBORHOOD AVE</span><span className="map-street street-two">MARKET STREET</span>
-      <span className="map-home"><Icon name="home" size={19} /></span>
-      <span className="map-courier" style={point}><Icon name={order.status === 'delivered' ? 'check' : order.courierId ? 'bike' : 'shop'} size={21} /></span>
-      <span className="map-caption">ILLUSTRATED TRACKER · NOT A REAL MAP</span>
-    </div>
-    <div className="tracking-caption"><span><Icon name="bike" size={18} /> {order.courierName ?? 'Finding a neighborhood courier'}</span><small>{order.location ? `${order.location.lat.toFixed(4)}, ${order.location.lng.toFixed(4)} · manually simulated` : 'Waiting for a simulated location update'}</small></div>
+    <TrackingMap store={store} location={order.location} />
+    <div className="tracking-caption"><span><Icon name="bike" size={18} /> {order.courierName ?? 'Finding a neighborhood courier'}</span><small>{order.location ? `${order.location.lat.toFixed(4)}, ${order.location.lng.toFixed(4)} · ${order.location.source === 'live' ? 'live location' : 'manually simulated'}` : 'No courier location shared'}</small></div>
+    <div className="map-legend">K: demo kitchen · C: {order.location?.source === 'live' ? 'live' : 'simulated'} courier. The delivery address is not mapped.</div>
   </div>;
 }
 
-export function OrderCard({ order, role, actorId, store, busy, onStatus, onClaim, onLocation }: {
-  order: Order; role: Role; actorId: string; store?: Store; busy: boolean;
+export function OrderCard({ order, role, actorId, store, session, busy, onStatus, onClaim, onLocation }: {
+  order: Order; role: Role; actorId: string; store?: Store; session: Session; busy: boolean;
   onStatus: (order: Order, status: Order['status']) => void;
   onClaim: (order: Order) => void; onLocation: (order: Order, location: { lat: number; lng: number }) => void;
 }) {
@@ -182,7 +174,7 @@ export function OrderCard({ order, role, actorId, store, busy, onStatus, onClaim
           {role === 'courier' && order.status === 'ready' && !order.courierId && <button className="primary" disabled={busy} onClick={() => onClaim(order)}>Claim delivery <Icon name="arrow" size={16} /></button>}
           {nextStatuses(role, order.status, claimed).map(status => <button key={status} disabled={busy} className={status === 'cancelled' ? 'text-button danger' : 'primary'} onClick={() => onStatus(order, status)}>{actionLabels[status]}</button>)}
         </div>
-        {role === 'courier' && claimed && active && <div className="simulation-tools"><span className="eyebrow">MANUAL LOCATION SIMULATION</span><div><button className="secondary" disabled={busy} onClick={() => onLocation(order, { lat: store?.lat ?? 47.607, lng: store?.lng ?? -122.337 })}>At kitchen</button><button className="secondary" disabled={busy} onClick={() => onLocation(order, { lat: 47.6072, lng: -122.3345 })}>Halfway</button><button className="secondary" disabled={busy} onClick={() => onLocation(order, { lat: 47.6067, lng: -122.3325 })}>At demo destination</button></div><small>Illustrative coordinates only, not the entered delivery address.</small></div>}
+        {role === 'courier' && claimed && active && <CourierLocationControls session={session} order={order} store={store} busy={busy} onLocation={onLocation} />}
         <details className="event-log"><summary>Order activity ({order.events.length})</summary><ol>{order.events.map((event, index) => <li key={`${event.at}-${index}`}><time>{new Date(event.at).toLocaleTimeString()}</time><span>{event.note}</span></li>)}</ol></details>
       </div>
       {(role === 'customer' || (role === 'courier' && claimed)) && order.status !== 'cancelled' && <Tracking order={order} store={store} />}
