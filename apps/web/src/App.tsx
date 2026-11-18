@@ -171,7 +171,10 @@ export function App() {
       <div className="demo-bar"><span><i /> THE COOKIST LOCAL DEMO <b>·</b> No real payments or deliveries</span><div className="role-tabs" aria-label="Demo workspace">{(['customer', 'merchant', 'courier'] as const).map(item =>
         <button key={item} className={role === item ? 'selected' : ''} disabled={busy || !accounts} onClick={() => void login(item)}>{item}</button>)}</div></div>
       <header className="header">
-        <button className="wordmark" onClick={discover}>cookist<span>®</span></button>
+        <div className="brand-lockup">
+          <button className="wordmark" onClick={discover}>cookist<span>®</span></button>
+          <span className="brand-byline">A Machi service</span>
+        </div>
         <div className="header-divider" />
         <button className="delivery-location" onClick={() => { setAddressDraft(address); setDialog('address'); }}><span className="location-symbol"><Icon name="pin" size={19} /></span><span><small>DELIVERING A LITTLE HAPPINESS TO</small><strong>{address || 'Set your delivery address'} <Icon name="chevron" size={14} /></strong></span></button>
         <div className="header-actions">
