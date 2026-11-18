@@ -7,9 +7,23 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 
 setWorkerUrl(workerUrl);
 
-type Details = { name: string; address: string; city: string; zipcode: string };
+type Details = { name: string; address: string; city: string; zipcode: string; website?: unknown };
 type Listing = Feature<Point, Details>;
 type Listings = FeatureCollection<Point, Details>;
+
+function safeWebsite(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length > 2048 || !/^https?:\/\//i.test(value)
+    || /[\u0000-\u0020\u007f]/.test(value)) return null;
+  try {
+    const url = new URL(value);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.port
+      || !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63}$/i.test(url.hostname)
+      || ['localhost', 'local', 'internal'].some(suffix => url.hostname.endsWith(`.${suffix}`))) return null;
+    return url.href;
+  } catch {
+    return null;
+  }
+}
 
 function isListings(value: unknown): value is Listings {
   if (!value || typeof value !== 'object' || !('type' in value) || value.type !== 'FeatureCollection'
@@ -132,6 +146,7 @@ function DirectoryMap({ data, onSelect, mapRef }: {
             || typeof properties.city !== 'string' || typeof properties.zipcode !== 'string') return;
           onSelect({ type: 'Feature', geometry: feature.geometry, properties: {
             name: properties.name, address: properties.address, city: properties.city, zipcode: properties.zipcode,
+            website: properties.website,
           } });
         });
       });
@@ -263,7 +278,8 @@ export function EstablishmentDirectory() {
     if (!data) return null;
     const term = query.trim().toLocaleLowerCase();
     return { type: 'FeatureCollection' as const, features: term
-      ? data.features.filter(feature => Object.values(feature.properties).some(value => value.toLocaleLowerCase().includes(term)))
+      ? data.features.filter(({ properties }) => [properties.name, properties.address, properties.city, properties.zipcode]
+        .some(value => value.toLocaleLowerCase().includes(term)))
       : data.features };
   }, [data, query]);
 
@@ -273,10 +289,12 @@ export function EstablishmentDirectory() {
     mapRef.current?.easeTo({ center: [lng, lat], zoom: 16 });
   }
 
+  const selectedWebsite = safeWebsite(selected?.properties.website);
   return <section className="establishment-directory" aria-labelledby="directory-heading">
     <div className="directory-heading">
       <div><span className="eyebrow">EXPLORE KING COUNTY</span><h2 id="directory-heading">Food establishment directory</h2>
-        <p>These scraped listings may be outdated or inaccurate. They are not verified Cookist partners and cannot be ordered from here.</p></div>
+        <p>These scraped listings may be outdated or inaccurate. They are not verified Cookist partners and cannot be ordered from here.</p>
+        <p>Candidate websites include data from <a href="https://overturemaps.org/" target="_blank" rel="noopener noreferrer">Overture Maps Foundation</a> and are not verified.</p></div>
       <button className="secondary" type="button" aria-expanded={expanded} aria-controls="directory-content" onClick={() => setExpanded(value => !value)}>{expanded ? 'Hide directory map' : 'Explore directory map'}</button>
     </div>
     {expanded && <div id="directory-content">
@@ -291,6 +309,7 @@ export function EstablishmentDirectory() {
         {selected && <div className="directory-detail" aria-live="polite">
           <strong>{selected.properties.name}</strong>
           <p>{[selected.properties.address, [selected.properties.city, selected.properties.zipcode].filter(Boolean).join(' ')].filter(Boolean).join(', ') || 'Address unavailable'}</p>
+          {selectedWebsite && <p><a href={selectedWebsite} target="_blank" rel="noopener noreferrer">Visit unverified website</a></p>}
           <p>Directory listing only; not available to order.</p>
         </div>}
         {query.trim() && <div className="directory-results" aria-label="Directory search results">

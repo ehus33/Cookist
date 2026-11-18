@@ -146,14 +146,50 @@ Location requires HTTPS (or localhost), browser/device support, and permission;
 if permission was previously denied, change it in the browser's site settings.
 This does not change the delivery address or demo restaurant search.
 
-The map uses a checked-in public GeoJSON file containing only names, addresses,
-cities, ZIP codes, and coordinates; phone and other source fields are omitted.
+The map uses a checked-in public GeoJSON file containing names, addresses,
+cities, ZIP codes, coordinates, and, where matched, a candidate website and its
+source ID; phone and other scrape fields are omitted. Candidate websites are
+unverified and may be incorrect, outdated, or unavailable. Missing links do not
+mean a business has no website. Opening a link takes the visitor to a third party.
 The original scrape at `data/king_county_food_establishments.json` is ignored by
 Git and excluded from container builds. To refresh the public file from a local
 scrape, run `npm run prepare-directory --workspace @cookist/web` and review the
-result before committing. The original scrape is not required for normal builds.
+result before committing. This retains links only for unchanged records and
+reports how many were retained; changed or removed records need rematching.
+The original scrape is not required for normal builds.
 Check the source's provenance, redistribution terms, and accuracy before publishing
 the directory beyond the private demo.
+
+Website candidates were matched locally against **Overture Maps Foundation**,
+[Places](https://docs.overturemaps.org/guides/places/), release `2026-10-21.0`.
+The Places theme is published under [CDLA Permissive 2.0](https://cdla.dev/permissive-2-0/)
+and [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0); the matcher uses
+records with CDLA Permissive 2.0 or [CC0](https://creativecommons.org/publicdomain/zero/1.0/)
+primary sources. Matches use names, proximity, address evidence, and website
+hostname checks, not individual website verification. No scraped listings are
+sent to Overture.
+
+To reapply matching, obtain a JSON array of regional Overture Places records with
+`id`, `name`, `websites`, `address`, `lng`, `lat`, and `sources` fields, then run
+`node apps/web/scripts/match-establishment-websites.mjs <path-to-json>` from the
+repository root. Existing links are preserved rather than refreshed or validated.
+For example, DuckDB with its `httpfs` extension can create the extract below
+without sending the local scrape to the provider (the scan downloads public data):
+
+```sql
+INSTALL httpfs;
+LOAD httpfs;
+COPY (
+  SELECT id, names."primary" AS name, websites,
+         addresses[1].freeform AS address, bbox.xmin AS lng, bbox.ymin AS lat, sources
+  FROM read_parquet('s3://overturemaps-us-west-2/release/2026-10-21.0/theme=places/type=place/*')
+  WHERE bbox.xmin BETWEEN -122.53 AND -121.08 AND bbox.ymin BETWEEN 47.14 AND 47.94
+    AND names."primary" IS NOT NULL AND len(websites) > 0
+) TO 'overture-king-websites.json' (FORMAT JSON, ARRAY true);
+```
+
+The extract is an intermediate file and need not be committed. Review changes
+before publishing, especially because automated matches can be wrong.
 Use **Stripe test/sandbox credentials only** during development; do not add live
 keys to this demo. Production authentication must replace identity switching
 before enabling real charges. Different web/native OIDC clients may need separate

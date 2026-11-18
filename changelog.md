@@ -4,6 +4,8 @@
 
 ### Changed
 
+- Added unverified candidate websites to some web directory listings using Overture
+  Places data; unmatched listings may still have websites.
 - Added an opt-in web map and search for the scraped King County food-establishment
   directory. These listings are unverified and not available for ordering.
 - Added opt-in, browser-local customer location tracking on the web directory map.
