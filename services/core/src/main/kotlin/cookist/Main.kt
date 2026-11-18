@@ -113,7 +113,9 @@ private fun Connection.save(table: String, key: String, body: JsonNode, column: 
     }
 }
 
-class CoreServer(private val db: Database, host: String = "127.0.0.1", port: Int = 8081) : AutoCloseable {
+class CoreServer private constructor(private val db: Database, host: String, port: Int, private val cognito: CognitoAuth?) : AutoCloseable {
+    constructor(db: Database, host: String = "127.0.0.1", port: Int = 8081) : this(db, host, port, null)
+    internal constructor(db: Database, cognito: CognitoAuth, host: String = "127.0.0.1", port: Int = 8081) : this(db, host, port, cognito)
     init {
         // Complete database reads and serializer initialization before accepting requests.
         db.read { c ->
@@ -140,11 +142,14 @@ class CoreServer(private val db: Database, host: String = "127.0.0.1", port: Int
         "couriers" to listOf(obj("id" to "courier-1", "name" to "Riley", "storeId" to null), obj("id" to "courier-2", "name" to "Jordan", "storeId" to null))
     )
     private fun actor(c: Connection, session: JsonNode): JsonNode =
-        accounts(c)[session["role"].asText() + "s"].first { it["id"] == session["actorId"] }
+        if (cognito != null) obj("id" to session["actorId"].asText(), "name" to "Customer", "storeId" to null)
+        else accounts(c)[session["role"].asText() + "s"].first { it["id"] == session["actorId"] }
     private fun session(c: Connection, x: HttpExchange): ObjectNode {
-        val auth = x.requestHeaders.getFirst("Authorization") ?: fail(401, "unauthorized", "A demo session is required")
-        if (!auth.startsWith("Bearer ") || auth.length > 200) fail(401, "unauthorized", "Invalid demo session")
-        return c.find("sessions", auth.removePrefix("Bearer "), "token") ?: fail(401, "unauthorized", "Invalid demo session")
+        val auth = x.requestHeaders.getFirst("Authorization") ?: fail(401, "unauthorized", "A session is required")
+        if (!auth.startsWith("Bearer ") || auth.length > 16384) fail(401, "unauthorized", "Invalid session")
+        val token = auth.removePrefix("Bearer ")
+        if (cognito != null) return obj("role" to "customer", "actorId" to cognito.authenticate(token))
+        return c.find("sessions", token, "token") ?: fail(401, "unauthorized", "Invalid demo session")
     }
     private fun role(s: JsonNode, expected: String) {
         if (s["role"].asText() != expected) fail(403, "forbidden", "This action requires the $expected role")
@@ -211,10 +216,12 @@ class CoreServer(private val db: Database, host: String = "127.0.0.1", port: Int
             return 200 to obj("status" to "ok")
         }
         if (path == "/api/demo-accounts") {
+            if (cognito != null) fail(404, "not_found", "Route not found")
             method(x, "GET")
             return 200 to db.read { accounts(it) }
         }
         if (path == "/api/sessions") {
+            if (cognito != null) fail(404, "not_found", "Route not found")
             method(x, "POST")
             val b = body(x); b.fieldsExactly("role", "actorId")
             val r = b.text("role"); val a = b.text("actorId")
@@ -391,10 +398,30 @@ class CoreServer(private val db: Database, host: String = "127.0.0.1", port: Int
     }
 }
 
+internal fun authMode(env: Map<String, String>): String {
+    val mode = env["COOKIST_AUTH_MODE"]
+    require(mode != null || (env["COOKIST_COGNITO_ISSUER"] == null && env["COOKIST_COGNITO_CLIENT_IDS"] == null)) {
+        "COOKIST_AUTH_MODE must be explicit when Cognito settings are supplied"
+    }
+    return mode ?: "demo"
+}
+
 fun main() {
+    val mode = authMode(System.getenv())
     val db = Database(Path.of(System.getenv("COOKIST_DB") ?: ".data/cookist.db"), Path.of(System.getenv("COOKIST_CATALOG") ?: "shared/catalog.json"))
-    val server = CoreServer(db, System.getenv("HOST") ?: "127.0.0.1", (System.getenv("PORT") ?: "8081").toInt())
+    val host = System.getenv("HOST") ?: "127.0.0.1"
+    val port = (System.getenv("PORT") ?: "8081").toInt()
+    val server = when (mode) {
+        "demo" -> CoreServer(db, host, port)
+        "cognito" -> {
+            val issuer = requireNotNull(System.getenv("COOKIST_COGNITO_ISSUER")) { "COOKIST_COGNITO_ISSUER is required" }
+            val clients = requireNotNull(System.getenv("COOKIST_COGNITO_CLIENT_IDS")) { "COOKIST_COGNITO_CLIENT_IDS is required" }
+                .split(',').map { it.trim() }.toSet()
+            CoreServer(db, CognitoAuth.create(issuer, clients), host, port)
+        }
+        else -> error("COOKIST_AUTH_MODE must be demo or cognito")
+    }
     Runtime.getRuntime().addShutdownHook(Thread { server.close() })
     server.start()
-    println("Cookist core listening on port ${server.port} (local demo only)")
+    println("Cookist core listening on port ${server.port} (auth mode: $mode)")
 }

@@ -189,6 +189,7 @@ class MainActivity : ComponentActivity() {
     Scaffold(
         topBar = { Column(Modifier.padding(20.dp)) {
             Text("Cookist", style = MaterialTheme.typography.headlineLarge, color = MaterialTheme.colorScheme.primary)
+            Text("A Machi service", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text("Good food. Your neighborhood. • ${model.role}")
             if (model.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
         } },
