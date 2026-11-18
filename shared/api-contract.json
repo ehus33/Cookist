@@ -3,7 +3,7 @@
   "version": 1,
   "baseUrl": "http://localhost:8080",
   "money": "Integer USD cents. Never accept client prices.",
-  "auth": "DEMO ONLY. POST /api/sessions selects a seeded actor. All protected routes require Authorization: Bearer <token>. Public browsing is allowed.",
+  "auth": "Default DEMO mode: POST /api/sessions selects a seeded actor. Experimental Cognito mode accepts verified access tokens and disables demo sessions. All protected routes require Authorization: Bearer <token>. Public browsing is allowed.",
   "errors": { "error": { "code": "machine_readable", "message": "Human-readable explanation" } },
   "roles": ["customer", "merchant", "courier"],
   "statuses": ["pending", "accepted", "preparing", "ready", "picked_up", "delivered", "cancelled"],
@@ -29,7 +29,7 @@
       "totals": { "subtotalCents": 1499, "taxCents": 150, "deliveryFeeCents": 299, "serviceFeeCents": 149, "totalCents": 2097 },
       "status": "pending", "payment": { "id": "string", "status": "captured|refunded", "method": "simulated" },
       "courierId": "string or null", "courierName": "string or null",
-      "location": { "lat": 47.6, "lng": -122.3, "updatedAt": "ISO8601" },
+      "location": { "lat": 47.6, "lng": -122.3, "updatedAt": "ISO8601", "source": "live for Cognito locations; omitted for demo" },
       "createdAt": "ISO8601", "updatedAt": "ISO8601",
       "events": [{ "status": "pending", "at": "ISO8601", "note": "string" }]
     }
@@ -38,6 +38,7 @@
     { "method": "GET", "path": "/health", "response": { "status": "ok" } },
     { "method": "GET", "path": "/api/demo-accounts", "response": { "customers": ["Account"], "merchants": ["Account"], "couriers": ["Account"] } },
     { "method": "POST", "path": "/api/sessions", "body": { "role": "customer|merchant|courier", "actorId": "string" }, "response": "Session" },
+    { "method": "GET", "path": "/api/me", "response": { "role": "customer|merchant|courier", "actorId": "string", "storeId": "string or null" }, "notes": "Experimental Cognito mode only; returns verified token identity and trusted group role." },
     { "method": "GET", "path": "/api/stores", "response": ["Store"] },
     { "method": "GET", "path": "/api/stores/{id}", "response": "Store" },
     { "method": "PATCH", "path": "/api/stores/{id}/availability", "role": "owning merchant", "body": { "isOpen": true }, "response": "Store" },
@@ -47,8 +48,10 @@
     { "method": "POST", "path": "/api/orders", "role": "customer", "body": { "storeId": "string", "items": [{ "menuItemId": "string", "quantity": 1 }], "deliveryAddress": "string, 8..300 trimmed chars", "paymentMethod": "demo_card|demo_decline", "idempotencyKey": "string, 8..100 chars" }, "response": "Order", "notes": "201 new; 200 identical replay; 409 reused key with changed payload; demo_decline 402 and no order. quantities 1..20; max 30 distinct items; tax rounded subtotal/10; service 149; store delivery fee. Closed stores/unavailable items reject checkout. Location initially null." },
     { "method": "POST", "path": "/api/orders/{id}/status", "body": { "status": "status" }, "response": "Order", "notes": "Enforce role, ownership and transition table. Courier must claim before pickup. Cancelled orders have simulated refunded payment." },
     { "method": "POST", "path": "/api/orders/{id}/claim", "role": "courier", "body": {}, "response": "Order", "notes": "Only ready unassigned; atomic compare-and-set. Other courier gets 409." },
-    { "method": "POST", "path": "/api/orders/{id}/location", "role": "assigned courier", "body": { "lat": 47.6, "lng": -122.3 }, "response": "Order", "notes": "Finite coordinates within Earth bounds, only ready or picked_up. Manual simulation, not GPS tracking." },
+    { "method": "POST", "path": "/api/orders/{id}/location-start", "role": "assigned courier", "body": {}, "response": { "sharingId": "string" }, "notes": "Experimental Cognito mode only; start explicit sharing on a ready or picked_up delivery." },
+    { "method": "POST", "path": "/api/orders/{id}/location", "role": "assigned courier", "body": { "lat": 47.6, "lng": -122.3, "sharingId": "required in Cognito mode only" }, "response": "Order", "notes": "Finite coordinates within Earth bounds, only ready or picked_up. Demo mode is manually simulated; Cognito mode requires an active sharing session and keeps positions in memory for at most 60 seconds of visibility." },
+    { "method": "POST", "path": "/api/orders/{id}/location-stop", "role": "assigned courier", "body": { "sharingId": "string" }, "response": { "status": "stopped" }, "notes": "Experimental Cognito mode only; ends the matching sharing session and clears its position." },
     { "method": "GET", "path": "/api/search", "service": "Python", "query": "q (max 100), cuisine, sort=relevance|rating|eta|fee, maxFeeCents, openOnly=true|false", "response": { "query": "string", "suggestions": [{ "type": "query|store", "text": "string", "storeId": "string or null" }], "stores": ["Store"] }, "notes": "Search name/cuisine/tags/menu terms, bounded limit 1..50 default 20. Fetch fresh core catalog. Never return fake success on core failure." }
   ],
-  "safety": "Seeded local demo, not production authentication or payments. No private DoorDash API, copied assets, real card numbers, GPS collection or external geocoding."
+  "safety": "Seeded local demo, not production-ready authentication or payments. Experimental opt-in web GPS requires Cognito mode; there is no client sign-in yet. No private DoorDash API, copied assets, real card numbers or external geocoding."
 }

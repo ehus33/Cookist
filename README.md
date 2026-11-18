@@ -8,8 +8,8 @@ This recreates the **kind of search flow observed with REA**, not DoorDash's sou
 branding, assets, private APIs, ranking, or production infrastructure. Search ranking,
 API contracts, tax rules, and the design here are our own implementations.
 
-**Demo only:** identities are selectable without passwords, money never moves, and
-courier locations are manually simulated. Do not expose this service publicly or use
+**Demo only:** by default identities are selectable without passwords, money never
+moves, and courier locations are manually simulated. Do not expose this service publicly or use
 real customer/card data. Changing the delivery address does not change the seeded
 Seattle catalog, illustrative distances, or travel estimates.
 
@@ -22,11 +22,28 @@ demo or expose it publicly.
 The core service can be started for backend testing with `COOKIST_AUTH_MODE=cognito`,
 `COOKIST_COGNITO_ISSUER=https://cognito-idp.<region>.amazonaws.com/<pool-id>`,
 and `COOKIST_COGNITO_CLIENT_IDS` set to a comma-separated list of public app
-client IDs. The service validates Cognito access tokens and treats each subject
-as a separate customer. It disables demo session creation and demo accounts;
-merchant and courier access are not implemented. Existing demo orders are not
-linked to Cognito identities. The default `demo` mode remains unchanged and is
-not authentication. Do not consider this backend mode production-ready.
+client IDs. The service validates Cognito access tokens. Users default to customers;
+the trusted Cognito groups `cookist-courier` and `cookist-merchant-<store-id>`
+grant courier or a single store's merchant access. Assign these groups only through
+trusted administration, never through self-service. Conflicting roles are rejected.
+Changes to group membership take effect when the access token expires.
+
+The service disables demo session creation and demo accounts in Cognito mode.
+Each database is bound to one authentication mode and, for Cognito, one user
+pool. Use a new database for Cognito; switching a demo database or user pool is
+rejected. Previously created demo and experimental Cognito orders are not
+automatically migrated or linked. The default `demo` mode remains
+unchanged and is not authentication. Do not consider this backend mode production-ready.
+
+The experimental web courier controls require a verified Cognito courier and an
+explicit click before requesting browser location permission. Sharing stops when
+the page is hidden or the delivery ends. Customers and the assigned merchant can
+see the current position. Location is kept only in the core process's memory,
+becomes unavailable after 60 seconds without an update, and is removed by a
+periodic cleanup within another 30 seconds; restarting the service clears it.
+This is single-instance behavior, not a production-ready distributed tracker.
+Web Cognito sign-in and native location sharing are not yet implemented, so this
+flow cannot yet be used end to end by app users.
 
 ## Architecture
 
@@ -89,13 +106,16 @@ blank placeholders are left unset. Restart the stack to apply changes. This does
 not modify already running services.
 
 **Configuration only:** the integration fields below are reserved for later
-implementation. Setting a URL or key does not enable a provider. The current demo
-payments, identities, address handling, and illustrated tracker remain unchanged.
-Native apps are unchanged. No provider has been chosen for the optional services.
+implementation, except that the web order tracker now uses OpenFreeMap's public
+Liberty style directly. The `OPENFREEMAP_STYLE_URL` environment variable is not
+read by the web app. Setting another URL or key does not enable a provider.
+Demo payments, identities, address handling, and simulated location updates remain
+unchanged. Native apps are unchanged. No provider has been chosen for the other
+optional services.
 
 | Integration | Reserved variables | Next implementation needed |
 |---|---|---|
-| OpenFreeMap | `OPENFREEMAP_STYLE_URL` | MapLibre renderer and visible attribution; no API key required for the public style |
+| OpenFreeMap | `OPENFREEMAP_STYLE_URL` (reserved, not read) | Web tracker uses MapLibre and the public Liberty style; native maps are not yet implemented |
 | Stripe | `STRIPE_PUBLISHABLE_KEY`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | Test-mode checkout, server totals, signed webhooks, idempotency, refunds |
 | Address autocomplete/geocoding | `GEOCODING_PROVIDER`, `GEOCODING_BASE_URL`, `GEOCODING_API_KEY` | Select an authorized provider, address validation and location-aware catalog |
 | Driving routes/ETA | `ROUTING_PROVIDER`, `ROUTING_BASE_URL`, `ROUTING_API_KEY` | Routing provider, travel estimates, real destination coordinates |
@@ -105,7 +125,35 @@ Native apps are unchanged. No provider has been chosen for the optional services
 | Production auth | `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_AUDIENCE` | Reserved only; the experimental Cognito backend uses the separate `COOKIST_COGNITO_*` settings above |
 
 OpenFreeMap supplies tiles/styles, not address search, routing, or location
-collection. Map attribution and provider usage terms must be respected when wired.
+collection. Web browsers request map data directly from OpenFreeMap, which can
+receive their IP addresses and the map area being viewed, including an approximate
+area around any live position displayed. Demo kitchens and simulated locations
+are shown in demo mode. The entered delivery address is not geocoded or sent to
+OpenFreeMap. Attribution is shown
+on the map. iOS and Android do not yet include maps.
+
+The web discovery page also has an opt-in King County food-establishment directory
+map based on a scraped dataset. Listings are not verified Cookist partners, may be outdated, and cannot be ordered
+from. Directory search is separate from the seeded demo catalog search. The map
+loads its data only when opened; map tiles are requested from OpenFreeMap, not the
+directory records themselves.
+
+On the directory map, **Use my location** requests browser permission and shows
+the current position locally. Location updates stop when the user stops them,
+closes the map, or hides/leaves the page; the position is not saved or sent to the
+Cookist backend. OpenFreeMap can infer the approximate area from tile requests.
+Location requires HTTPS (or localhost), browser/device support, and permission;
+if permission was previously denied, change it in the browser's site settings.
+This does not change the delivery address or demo restaurant search.
+
+The map uses a checked-in public GeoJSON file containing only names, addresses,
+cities, ZIP codes, and coordinates; phone and other source fields are omitted.
+The original scrape at `data/king_county_food_establishments.json` is ignored by
+Git and excluded from container builds. To refresh the public file from a local
+scrape, run `npm run prepare-directory --workspace @cookist/web` and review the
+result before committing. The original scrape is not required for normal builds.
+Check the source's provenance, redistribution terms, and accuracy before publishing
+the directory beyond the private demo.
 Use **Stripe test/sandbox credentials only** during development; do not add live
 keys to this demo. Production authentication must replace identity switching
 before enabling real charges. Different web/native OIDC clients may need separate
@@ -191,7 +239,8 @@ binding restricted to your trusted local development network.
    manually send simulated positions, and complete delivery. Only one courier can
    claim a job. Manual destination coordinates are illustrative, not geocoded.
 5. **Customer:** return to the same customer identity to see status history, courier
-   assignment, and the illustrated tracker. Web updates every four seconds.
+   assignment, and the interactive web map. Web updates every four seconds.
+   Kitchen and courier positions are demo data, not live GPS or an actual route.
 6. To test refunds, create another order and cancel it while pending. Merchants may
    cancel before courier pickup. The simulated payment is marked refunded.
 
@@ -245,8 +294,8 @@ README. iOS requires macOS and Xcode; it cannot be compiled on Windows.
 
 This is a working local full-flow prototype, **not a production delivery business**.
 It does not include verified authentication, onboarding/KYC, real payment processing
-or PCI handling, live GPS/maps/routing, push/SMS, real inventory reconciliation,
+or PCI handling, production-ready location tracking/routing, native maps, push/SMS, real inventory reconciliation,
 tax jurisdiction handling, payouts, dispatch optimization, operational support,
 or production deployment hardening. Implement those against authorized providers
-before real-world use. Do not interpret seeded ratings/ETAs or the schematic tracker
-as live facts.
+before real-world use. Do not interpret seeded ratings/ETAs or simulated map
+positions as live facts.

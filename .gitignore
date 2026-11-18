@@ -10,6 +10,7 @@ dist/
 **/local.properties
 *.log
 *.tsbuildinfo
+data/king_county_food_establishments.json
 .env
 .env.*
 !.env.example
