@@ -41,7 +41,7 @@ vi.mock('maplibre-gl', () => ({
 const listings = {
   type: 'FeatureCollection', features: [
     { type: 'Feature', geometry: { type: 'Point', coordinates: [-122.3, 47.6] }, properties: { name: '<img src=x onerror=alert(1)>', address: '1 Main', city: 'Seattle', zipcode: '98101' } },
-    { type: 'Feature', geometry: { type: 'Point', coordinates: [-122.2, 47.7] }, properties: { name: 'Portage Bay Cafe', address: '2 Main', city: 'Seattle', zipcode: '98102' } },
+    { type: 'Feature', geometry: { type: 'Point', coordinates: [-122.2, 47.7] }, properties: { name: 'Portage Bay Cafe', address: '2 Main', city: 'Seattle', zipcode: '98102', website: 'https://portagebaycafe.com/' } },
   ],
 };
 
@@ -73,6 +73,8 @@ describe('establishment directory', () => {
     fireEvent.click(screen.getByRole('button', { name: /Portage Bay Cafe/ }));
     expect(map.easeTo).toHaveBeenCalledWith({ center: [-122.2, 47.7], zoom: 16 });
     expect(screen.getByText('Directory listing only; not available to order.')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Visit unverified website' })).toHaveAttribute('href', 'https://portagebaycafe.com/');
+    expect(screen.getByRole('link', { name: 'Visit unverified website' })).toHaveAttribute('rel', 'noopener noreferrer');
 
     fireEvent.change(screen.getByLabelText('Search directory by name, address, city, or ZIP'), { target: { value: '<img' } });
     fireEvent.click(screen.getByRole('button', { name: /<img src=x/ }));
@@ -111,6 +113,23 @@ describe('establishment directory', () => {
     const pointClick = map.on.mock.calls.find(call => call[0] === 'click' && call[1] === 'establishment-points')?.[2];
     act(() => pointClick({ features: [listings.features[1]] }));
     expect(screen.getByText('Portage Bay Cafe')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Visit unverified website' })).toHaveAttribute('href', 'https://portagebaycafe.com/');
+  });
+
+  it('does not render unsafe websites or search website fields', async () => {
+    const unsafe = { ...listings, features: [{ ...listings.features[1], properties: {
+      ...listings.features[1].properties, website: 'javascript:alert(1)', websiteSourceId: 'distinctsourceid',
+    } }] };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => unsafe }));
+    render(<EstablishmentDirectory />);
+    fireEvent.click(screen.getByRole('button', { name: 'Explore directory map' }));
+    await screen.findByText(/1 listings match/);
+    const search = screen.getByLabelText('Search directory by name, address, city, or ZIP');
+    fireEvent.change(search, { target: { value: 'distinctsourceid' } });
+    expect(screen.getByText(/0 listings match/)).toBeInTheDocument();
+    fireEvent.change(search, { target: { value: 'portage' } });
+    fireEvent.click(screen.getByRole('button', { name: /Portage Bay Cafe/ }));
+    expect(screen.queryByRole('link', { name: 'Visit unverified website' })).not.toBeInTheDocument();
   });
 
   it('requests location on click, updates the marker, and stops on demand', async () => {
