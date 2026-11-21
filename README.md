@@ -4,8 +4,8 @@ Cookist is being refocused on deployments. The repository currently contains a
 neutral web and native workspace, a Go gateway, and a Kotlin authentication
 service. Deployment-management functionality and Terraform are not yet implemented.
 
-The existing AWS demo is unchanged. Keep it private: the new workspace and its
-experimental authentication have not been deployed or verified end to end.
+The AWS demo uses the neutral workspace and experimental Cognito authentication.
+Keep it private; it is not configured for production use.
 
 ## Run on Windows
 
@@ -26,8 +26,11 @@ http://localhost:8080. The gateway binds to loopback.
 ## Experimental authentication
 
 The web app can use Cognito managed login with authorization code and PKCE.
-Provisioning and end-to-end testing remain pending; iOS and Android do not yet
-support Cognito sign-in. The default local workspace is unauthenticated.
+A development user pool can be configured as described below. The private AWS
+demo uses the same user pool with a separate web client; sign-in and sign-out
+were tested with temporary accounts. Real email verification remains untested.
+iOS and Android do not yet support Cognito sign-in. The default local
+workspace is unauthenticated.
 Do not expose it publicly or use it for real users.
 
 For an isolated test, create a Cognito user pool and public app client with
@@ -35,6 +38,11 @@ managed login, authorization-code flow with PKCE, `openid` and `email` scopes,
 token revocation, and no client secret. Register `<origin>/auth/callback` as
 a callback URL and `<origin>/` as a sign-out URL. Enable email verification and
 account recovery. Managed login v2 requires a branding style for each app client.
+
+The local development pool uses a username and password with a verified email
+for recovery. Cognito's default email delivery has development-scale limits;
+production requires a reviewed email, MFA, and security configuration. AWS
+resources may incur charges.
 
 Set `COOKIST_AUTH_MODE=cognito` for core and gateway, and configure
 `COOKIST_COGNITO_ISSUER` and `COOKIST_COGNITO_CLIENT_IDS` for core. Set
