@@ -12,44 +12,38 @@ import (
 
 func TestRoutingAndCredentialForwarding(t *testing.T) {
 	core := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer demo" {
+		if r.Header.Get("Authorization") != "Bearer token" {
 			t.Error("authorization was not forwarded")
 		}
 		_, _ = w.Write([]byte("core"))
 	}))
 	defer core.Close()
-	search := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("q") != "pizza" {
-			t.Error("query was not preserved")
-		}
-		_, _ = w.Write([]byte("search"))
-	}))
-	defer search.Close()
-	handler, err := newGateway(core.URL, search.URL, t.TempDir(), nil)
+	handler, err := newGateway(core.URL, t.TempDir(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, test := range []struct{ path, want string }{{"/api/orders", "core"}, {"/api/search?q=pizza", "search"}} {
-		req := httptest.NewRequest("GET", test.path, nil)
-		req.Header.Set("Authorization", "Bearer demo")
-		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, req)
-		if rec.Code != 200 || rec.Body.String() != test.want {
-			t.Fatalf("got %d %q", rec.Code, rec.Body.String())
-		}
+	req := httptest.NewRequest("GET", "/api/me", nil)
+	req.Header.Set("Authorization", "Bearer token")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != 200 || rec.Body.String() != "core" {
+		t.Fatalf("got %d %q", rec.Code, rec.Body.String())
 	}
 }
 
 func TestServiceErrorsAndOriginPolicy(t *testing.T) {
-	handler, err := newGateway("http://127.0.0.1:1", "http://127.0.0.1:1", t.TempDir(), []string{"http://localhost:5173"})
+	handler, err := newGateway("http://127.0.0.1:1", t.TempDir(), []string{"http://localhost:5173"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, test := range []struct {
 		method, path, origin string
 		want                 int
-	}{{"GET", "/api/stores", "", 502}, {"GET", "/health", "", 503}, {"GET", "/api/stores", "https://evil.example", 403},
-		{"OPTIONS", "/api/stores", "http://localhost:5173", 204}, {"POST", "/api/search", "", 405}} {
+	}{
+		{"GET", "/api/me", "", 502}, {"GET", "/health", "", 503},
+		{"GET", "/api/me", "https://evil.example", 403},
+		{"OPTIONS", "/api/me", "http://localhost:5173", 204},
+	} {
 		req := httptest.NewRequest(test.method, test.path, nil)
 		req.Header.Set("Origin", test.origin)
 		rec := httptest.NewRecorder()
@@ -60,12 +54,31 @@ func TestServiceErrorsAndOriginPolicy(t *testing.T) {
 	}
 }
 
-func TestOversizedBodiesRejectedBeforeProxying(t *testing.T) {
-	handler, err := newGateway("http://127.0.0.1:1", "http://127.0.0.1:1", t.TempDir(), nil)
+func TestHealthDependsOnCore(t *testing.T) {
+	core := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			t.Errorf("unexpected health path %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer core.Close()
+	handler, err := newGateway(core.URL, t.TempDir(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := httptest.NewRequest("POST", "/api/orders", strings.NewReader(strings.Repeat("x", 65537)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest("GET", "/health", nil))
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"status":"ok"`) {
+		t.Fatalf("got %d %q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestOversizedBodiesRejectedBeforeProxying(t *testing.T) {
+	handler, err := newGateway("http://127.0.0.1:1", t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("POST", "/api/example", strings.NewReader(strings.Repeat("x", 65537)))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != 413 {
@@ -80,7 +93,7 @@ func TestStaticFallbackDoesNotMaskAPIErrors(t *testing.T) {
 	}
 	upstream := httptest.NewServer(http.NotFoundHandler())
 	defer upstream.Close()
-	handler, err := newGateway(upstream.URL, upstream.URL, dir, nil)
+	handler, err := newGateway(upstream.URL, dir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +102,9 @@ func TestStaticFallbackDoesNotMaskAPIErrors(t *testing.T) {
 	for _, test := range []struct {
 		path string
 		want int
-	}{{"/orders/123", 200}, {"/api/missing", 404}, {"/missing.js", 404}} {
+	}{
+		{"/workspace", 200}, {"/api/missing", 404}, {"/missing.js", 404},
+	} {
 		res, err := http.Get(server.URL + test.path)
 		if err != nil {
 			t.Fatal(err)
@@ -101,6 +116,47 @@ func TestStaticFallbackDoesNotMaskAPIErrors(t *testing.T) {
 		}
 		if test.want == 404 && strings.Contains(string(body), "Cookist") {
 			t.Fatal("API error masked by SPA fallback")
+		}
+	}
+}
+
+func TestCognitoGateProtectsAPIsAndFailsClosed(t *testing.T) {
+	core := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/me" {
+			t.Errorf("unexpected auth path %s", r.URL.Path)
+		}
+		switch r.Header.Get("Authorization") {
+		case "Bearer valid":
+			w.WriteHeader(200)
+		case "Bearer forbidden":
+			w.WriteHeader(403)
+		case "Bearer unavailable":
+			w.WriteHeader(500)
+		default:
+			w.WriteHeader(401)
+		}
+	}))
+	defer core.Close()
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) })
+	handler, err := requireCognito(next, core.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		method, path, auth string
+		want               int
+	}{
+		{"GET", "/api/me", "", 401}, {"GET", "/api/example", "Bearer invalid", 401},
+		{"GET", "/api/example", "Bearer forbidden", 403}, {"GET", "/api/example", "Bearer unavailable", 503},
+		{"GET", "/api/example", "Bearer valid", 204}, {"GET", "/health", "", 204},
+		{"GET", "/", "", 204}, {"OPTIONS", "/api/me", "", 204},
+	} {
+		req := httptest.NewRequest(test.method, test.path, nil)
+		req.Header.Set("Authorization", test.auth)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != test.want {
+			t.Errorf("%s %s: got %d want %d", test.method, test.path, rec.Code, test.want)
 		}
 	}
 }

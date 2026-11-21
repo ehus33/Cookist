@@ -21,23 +21,3 @@ targets:
         INFOPLIST_KEY_CFBundleDisplayName: Cookist
         MARKETING_VERSION: "1.0"
         CURRENT_PROJECT_VERSION: "1"
-    info:
-      path: Cookist/Info.plist
-      properties:
-        NSAppTransportSecurity:
-          NSAllowsLocalNetworking: true
-          NSExceptionDomains:
-            localhost:
-              NSExceptionAllowsInsecureHTTPLoads: true
-              NSIncludesSubdomains: false
-    scheme:
-      testTargets: [CookistTests]
-  CookistTests:
-    type: bundle.unit-test
-    platform: iOS
-    sources: [CookistTests]
-    settings:
-      base:
-        GENERATE_INFOPLIST_FILE: YES
-    dependencies:
-      - target: Cookist

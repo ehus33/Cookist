@@ -30,15 +30,13 @@ $gateway = Join-Path $root '.tools\cookist-gateway.exe'
 foreach ($required in @($core, $gateway, (Join-Path $root 'apps\web\dist\index.html'))) {
     if (-not (Test-Path -LiteralPath $required)) { throw "Missing $required. Run without -SkipBuild." }
 }
-foreach ($port in @(8080, 8081, 8082)) {
+foreach ($port in @(8080, 8081)) {
     $connection = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
     if ($connection) { throw "Port $port is already in use. Stop that service explicitly before starting Cookist." }
 }
-if (-not (Test-Path -LiteralPath '.data')) { New-Item -ItemType Directory -Path '.data' | Out-Null }
 $children = @()
 try {
     $children += Start-Process -FilePath $env:ComSpec -ArgumentList @('/c', "`"`"$core`"`"") -WorkingDirectory $root -NoNewWindow -PassThru
-    $children += Start-Process -FilePath (Get-Command python).Source -ArgumentList @('-u', 'services\search\search.py') -WorkingDirectory $root -NoNewWindow -PassThru
     $children += Start-Process -FilePath $gateway -WorkingDirectory $root -NoNewWindow -PassThru
     $ready = $false
     for ($i = 0; $i -lt 50; $i++) {
@@ -56,7 +54,7 @@ try {
     }
     if (-not $ready) { throw 'Cookist did not become ready. See the service errors above.' }
     Write-Host "`nCookist is ready: http://localhost:8080"
-    Write-Host 'Local demo only. Press Ctrl+C to stop the stack.'
+    Write-Host 'Press Ctrl+C to stop the stack.'
     while ($true) {
         foreach ($child in $children) {
             if ($child.HasExited) { throw "Cookist process $($child.Id) exited unexpectedly." }
