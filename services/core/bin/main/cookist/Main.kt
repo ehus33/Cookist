@@ -58,6 +58,7 @@ class Database(private val path: Path, catalog: Path) {
                 s.execute("CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, body TEXT NOT NULL)")
                 s.execute("CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY, body TEXT NOT NULL)")
                 s.execute("CREATE TABLE IF NOT EXISTS idempotency (actor TEXT NOT NULL, key TEXT NOT NULL, payload TEXT NOT NULL, status INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(actor,key))")
+                s.execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             }
         }
         val seed = json.readTree(catalog.toFile())
@@ -96,6 +97,28 @@ class Database(private val path: Path, catalog: Path) {
             throw e
         }
     }
+
+    internal fun bindAuthentication(mode: String) = write { c ->
+        val existing = c.prepareStatement("SELECT value FROM metadata WHERE key='auth_mode'").use { statement ->
+            statement.executeQuery().use { result -> if (result.next()) result.getString(1) else null }
+        }
+        if (existing == null) {
+            if (mode == "demo") {
+                require(c.all("orders").none { it["customerId"]?.asText()?.startsWith("cognito:") == true }) {
+                    "A database containing Cognito orders cannot be used in demo mode"
+                }
+            } else {
+                require(c.all("orders").isEmpty() && c.all("sessions").isEmpty()) {
+                    "Cognito mode requires a new database; existing orders and demo sessions are not migrated"
+                }
+            }
+            c.prepareStatement("INSERT INTO metadata(key,value) VALUES ('auth_mode',?)").use {
+                it.setString(1, mode); it.executeUpdate()
+            }
+        } else {
+            require(existing == mode) { "Database belongs to a different authentication mode or Cognito user pool" }
+        }
+    }
 }
 
 private fun Connection.all(table: String): List<JsonNode> =
@@ -113,8 +136,11 @@ private fun Connection.save(table: String, key: String, body: JsonNode, column: 
     }
 }
 
-class CoreServer(private val db: Database, host: String = "127.0.0.1", port: Int = 8081) : AutoCloseable {
+class CoreServer private constructor(private val db: Database, host: String, port: Int, private val cognito: CognitoAuth?) : AutoCloseable {
+    constructor(db: Database, host: String = "127.0.0.1", port: Int = 8081) : this(db, host, port, null)
+    internal constructor(db: Database, cognito: CognitoAuth, host: String = "127.0.0.1", port: Int = 8081) : this(db, host, port, cognito)
     init {
+        db.bindAuthentication(cognito?.actorPrefix ?: "demo")
         // Complete database reads and serializer initialization before accepting requests.
         db.read { c ->
             json.writeValueAsBytes(catalog(c))
@@ -124,13 +150,14 @@ class CoreServer(private val db: Database, host: String = "127.0.0.1", port: Int
     }
 
     private val executor = Executors.newFixedThreadPool(16)
+    private val liveLocations = if (cognito != null) LiveLocations() else null
     private val server = HttpServer.create(InetSocketAddress(host, port), 64).apply {
         executor = this@CoreServer.executor
         createContext("/") { exchange -> handle(exchange) }
     }
     val port: Int get() = server.address.port
     fun start() = server.start()
-    override fun close() { server.stop(0); executor.shutdownNow() }
+    override fun close() { server.stop(0); executor.shutdownNow(); liveLocations?.close() }
 
     private fun catalog(c: Connection): JsonNode = node(c.all("stores"))
 
@@ -140,25 +167,49 @@ class CoreServer(private val db: Database, host: String = "127.0.0.1", port: Int
         "couriers" to listOf(obj("id" to "courier-1", "name" to "Riley", "storeId" to null), obj("id" to "courier-2", "name" to "Jordan", "storeId" to null))
     )
     private fun actor(c: Connection, session: JsonNode): JsonNode =
-        accounts(c)[session["role"].asText() + "s"].first { it["id"] == session["actorId"] }
+        if (cognito != null) obj("id" to session["actorId"].asText(),
+            "name" to when (session["role"].asText()) { "courier" -> "Courier"; "merchant" -> "Merchant"; else -> "Customer" },
+            "storeId" to session["storeId"]?.takeUnless { it.isNull }?.asText())
+        else accounts(c)[session["role"].asText() + "s"].first { it["id"] == session["actorId"] }
     private fun session(c: Connection, x: HttpExchange): ObjectNode {
-        val auth = x.requestHeaders.getFirst("Authorization") ?: fail(401, "unauthorized", "A demo session is required")
-        if (!auth.startsWith("Bearer ") || auth.length > 200) fail(401, "unauthorized", "Invalid demo session")
-        return c.find("sessions", auth.removePrefix("Bearer "), "token") ?: fail(401, "unauthorized", "Invalid demo session")
+        val auth = x.requestHeaders.getFirst("Authorization") ?: fail(401, "unauthorized", "A session is required")
+        if (!auth.startsWith("Bearer ") || auth.length > 16384) fail(401, "unauthorized", "Invalid session")
+        val token = auth.removePrefix("Bearer ")
+        if (cognito != null) {
+            val identity = cognito.authenticate(token)
+            if (identity.storeId != null && c.find("stores", identity.storeId) == null)
+                fail(403, "forbidden", "Merchant store is not configured")
+            return obj("role" to identity.role, "actorId" to identity.subject, "storeId" to identity.storeId)
+        }
+        return c.find("sessions", token, "token") ?: fail(401, "unauthorized", "Invalid demo session")
     }
     private fun role(s: JsonNode, expected: String) {
         if (s["role"].asText() != expected) fail(403, "forbidden", "This action requires the $expected role")
     }
-    private fun visible(order: JsonNode, s: JsonNode): Boolean = when (s["role"].asText()) {
+    private fun visible(order: JsonNode, s: JsonNode): Boolean {
+        val customerId = order["customerId"].asText()
+        if (cognito == null && customerId.startsWith("cognito:")) return false
+        if (cognito != null && !customerId.startsWith(cognito.actorPrefix)) return false
+        return when (s["role"].asText()) {
         "customer" -> order["customerId"] == s["actorId"]
-        "merchant" -> s["actorId"].asText() == "merchant-${order["storeId"].asText()}"
+        "merchant" -> if (cognito != null) s["storeId"] == order["storeId"] else s["actorId"].asText() == "merchant-${order["storeId"].asText()}"
         "courier" -> order["courierId"] == s["actorId"] || (order["status"].asText() == "ready" && order["courierId"].isNull)
         else -> false
+        }
     }
     private fun order(c: Connection, key: String, s: JsonNode): ObjectNode {
         val found = c.find("orders", key)
         if (found == null || !visible(found, s)) fail(404, "not_found", "Order not found")
         return found
+    }
+    private fun presentedOrder(order: JsonNode): JsonNode {
+        if (liveLocations == null) return order
+        val result = order.deepCopy<ObjectNode>()
+        val courier = order["courierId"]?.takeUnless { it.isNull }?.asText()
+        val location = if (courier != null && order["status"].asText() in setOf("ready", "picked_up"))
+            liveLocations.get(order["id"].asText(), courier) else null
+        result.set<JsonNode>("location", node(location))
+        return result
     }
     private fun store(c: Connection, key: String): ObjectNode = c.find("stores", key) ?: fail(404, "not_found", "Store not found")
 
@@ -211,10 +262,12 @@ class CoreServer(private val db: Database, host: String = "127.0.0.1", port: Int
             return 200 to obj("status" to "ok")
         }
         if (path == "/api/demo-accounts") {
+            if (cognito != null) fail(404, "not_found", "Route not found")
             method(x, "GET")
             return 200 to db.read { accounts(it) }
         }
         if (path == "/api/sessions") {
+            if (cognito != null) fail(404, "not_found", "Route not found")
             method(x, "POST")
             val b = body(x); b.fieldsExactly("role", "actorId")
             val r = b.text("role"); val a = b.text("actorId")
@@ -223,6 +276,11 @@ class CoreServer(private val db: Database, host: String = "127.0.0.1", port: Int
                 requireInput(accounts(c)[r + "s"].any { it["id"].asText() == a }, "Unknown actor for role")
                 obj("token" to id(), "role" to r, "actorId" to a).also { c.save("sessions", it["token"].asText(), it, "token") }
             }
+        }
+        if (path == "/api/me") {
+            if (cognito == null) fail(404, "not_found", "Route not found")
+            method(x, "GET")
+            return 200 to db.read { session(it, x) }
         }
         if (path == "/api/stores") {
             method(x, "GET")
@@ -253,7 +311,7 @@ class CoreServer(private val db: Database, host: String = "127.0.0.1", port: Int
         if (path == "/api/orders") {
             if (x.requestMethod == "GET") return 200 to db.read { c ->
                 val s = session(c, x)
-                node(c.all("orders").filter { visible(it, s) }.reversed())
+                node(c.all("orders").filter { visible(it, s) }.reversed().map { presentedOrder(it) })
             }
             method(x, "POST")
             val b = body(x)
@@ -262,13 +320,31 @@ class CoreServer(private val db: Database, host: String = "127.0.0.1", port: Int
         if (parts.size in 3..4 && parts.take(2) == listOf("api", "orders")) {
             if (parts.size == 3) {
                 method(x, "GET")
-                return 200 to db.read { c -> order(c, parts[2], session(c, x)) }
+                return 200 to db.read { c -> presentedOrder(order(c, parts[2], session(c, x))) }
             }
             requireInput(parts[3].length <= 50, "Invalid action")
-            if (parts[3] !in setOf("status", "claim", "location")) fail(404, "not_found", "Route not found")
+            if (parts[3] !in setOf("status", "claim", "location", "location-start", "location-stop")) fail(404, "not_found", "Route not found")
             method(x, "POST")
             val b = body(x)
-            return 200 to db.write { c -> changeOrder(c, session(c, x), parts[2], parts[3], b) }
+            return 200 to db.write { c ->
+                val s = session(c, x)
+                if (parts[3] in setOf("location-start", "location-stop")) {
+                    if (liveLocations == null) fail(404, "not_found", "Route not found")
+                    val o = order(c, parts[2], s)
+                    role(s, "courier")
+                    if (o["courierId"] != s["actorId"]) fail(403, "forbidden", "Claim the order before sharing location")
+                    if (parts[3] == "location-start") {
+                        b.fieldsExactly()
+                        if (o["status"].asText() !in setOf("ready", "picked_up")) fail(409, "invalid_transition", "Location sharing requires an active delivery")
+                        obj("sharingId" to liveLocations.start(parts[2], s["actorId"].asText()))
+                    } else {
+                        b.fieldsExactly("sharingId")
+                        if (!liveLocations.stop(parts[2], s["actorId"].asText(), b.text("sharingId")))
+                            fail(409, "sharing_expired", "Location sharing has already ended")
+                        obj("status" to "stopped")
+                    }
+                } else presentedOrder(changeOrder(c, s, parts[2], parts[3], b))
+            }
         }
         fail(404, "not_found", "Route not found")
     }
@@ -340,6 +416,10 @@ class CoreServer(private val db: Database, host: String = "127.0.0.1", port: Int
         if (action == "claim") {
             role(s, "courier"); b.fieldsExactly()
             val existing = c.find("orders", key) ?: fail(404, "not_found", "Order not found")
+            val customerId = existing["customerId"].asText()
+            if ((cognito == null && customerId.startsWith("cognito:")) ||
+                (cognito != null && !customerId.startsWith(cognito.actorPrefix)))
+                fail(404, "not_found", "Order not found")
             if (existing["status"].asText() != "ready" || !existing["courierId"].isNull)
                 fail(409, "claim_conflict", "Order is not available to claim")
             existing.put("courierId", s["actorId"].asText())
@@ -354,12 +434,18 @@ class CoreServer(private val db: Database, host: String = "127.0.0.1", port: Int
         val current = o["status"].asText()
         val at = now()
         if (action == "location") {
-            role(s, "courier"); b.fieldsExactly("lat", "lng")
+            role(s, "courier")
+            if (liveLocations == null) b.fieldsExactly("lat", "lng") else b.fieldsExactly("lat", "lng", "sharingId")
             if (o["courierId"] != s["actorId"]) fail(403, "forbidden", "Claim the order before updating its location")
             if (current !in setOf("ready", "picked_up")) fail(409, "invalid_transition", "Location updates require an active delivery")
             val lat = b["lat"]; val lng = b["lng"]
             requireInput(lat.isNumber && lng.isNumber && lat.asDouble().isFinite() && lng.asDouble().isFinite() &&
                 lat.asDouble() in -90.0..90.0 && lng.asDouble() in -180.0..180.0, "Coordinates must be finite and within Earth bounds")
+            if (liveLocations != null) {
+                if (!liveLocations.update(key, s["actorId"].asText(), b.text("sharingId"), lat.asDouble(), lng.asDouble()))
+                    fail(409, "sharing_expired", "Start location sharing again")
+                return o
+            }
             o.set<JsonNode>("location", obj("lat" to lat.asDouble(), "lng" to lng.asDouble(), "updatedAt" to at))
         } else {
             b.fieldsExactly("status")
@@ -382,6 +468,7 @@ class CoreServer(private val db: Database, host: String = "127.0.0.1", port: Int
             }
             if (!allowed) fail(409, "invalid_transition", "This role cannot perform the requested transition")
             o.put("status", target)
+            if (target in setOf("delivered", "cancelled")) liveLocations?.clear(key)
             if (target == "cancelled") (o["payment"] as ObjectNode).put("status", "refunded")
             o.withArray("events").add(obj("status" to target, "at" to at, "note" to "Status updated by ${s["role"].asText()}"))
         }
@@ -391,10 +478,30 @@ class CoreServer(private val db: Database, host: String = "127.0.0.1", port: Int
     }
 }
 
+internal fun authMode(env: Map<String, String>): String {
+    val mode = env["COOKIST_AUTH_MODE"]
+    require(mode != null || (env["COOKIST_COGNITO_ISSUER"] == null && env["COOKIST_COGNITO_CLIENT_IDS"] == null)) {
+        "COOKIST_AUTH_MODE must be explicit when Cognito settings are supplied"
+    }
+    return mode ?: "demo"
+}
+
 fun main() {
+    val mode = authMode(System.getenv())
     val db = Database(Path.of(System.getenv("COOKIST_DB") ?: ".data/cookist.db"), Path.of(System.getenv("COOKIST_CATALOG") ?: "shared/catalog.json"))
-    val server = CoreServer(db, System.getenv("HOST") ?: "127.0.0.1", (System.getenv("PORT") ?: "8081").toInt())
+    val host = System.getenv("HOST") ?: "127.0.0.1"
+    val port = (System.getenv("PORT") ?: "8081").toInt()
+    val server = when (mode) {
+        "demo" -> CoreServer(db, host, port)
+        "cognito" -> {
+            val issuer = requireNotNull(System.getenv("COOKIST_COGNITO_ISSUER")) { "COOKIST_COGNITO_ISSUER is required" }
+            val clients = requireNotNull(System.getenv("COOKIST_COGNITO_CLIENT_IDS")) { "COOKIST_COGNITO_CLIENT_IDS is required" }
+                .split(',').map { it.trim() }.toSet()
+            CoreServer(db, CognitoAuth.create(issuer, clients), host, port)
+        }
+        else -> error("COOKIST_AUTH_MODE must be demo or cognito")
+    }
     Runtime.getRuntime().addShutdownHook(Thread { server.close() })
     server.start()
-    println("Cookist core listening on port ${server.port} (local demo only)")
+    println("Cookist core listening on port ${server.port} (auth mode: $mode)")
 }
