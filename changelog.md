@@ -4,17 +4,10 @@
 
 ### Changed
 
-- Added unverified candidate websites to some web directory listings using Overture
-  Places data; unmatched listings may still have websites.
-- Added an opt-in web map and search for the scraped King County food-establishment
-  directory. These listings are unverified and not available for ordering.
-- Added opt-in, browser-local customer location tracking on the web directory map.
-- Added "A Machi service" beneath the Cookist header branding on web, iOS, and Android.
-- Replaced the web's illustrated order tracker with an OpenFreeMap map showing demo
-  kitchen and simulated courier locations. Native maps are not yet available.
+- Removed the restaurant, ordering, map, and delivery features for the deployment-focused pivot.
+- Replaced the previous interfaces with a neutral workspace.
 
 ### In progress
 
-- Added experimental Cognito role checks and opt-in web location-sharing controls with
-  short-lived, order-scoped backend positions. Cognito client sign-in, native location
-  sharing, end-to-end provisioning, and deployment are not yet implemented.
+- Experimental web Cognito sign-in requires provisioning and end-to-end validation.
+- Deployment-management functionality and Terraform are not yet implemented.

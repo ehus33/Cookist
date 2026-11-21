@@ -6,35 +6,26 @@ services:
     environment:
       HOST: 0.0.0.0
       PORT: 8081
-      COOKIST_DB: /app/data/cookist.db
-      COOKIST_CATALOG: /app/shared/catalog.json
-    volumes:
-      - cookist-data:/app/data
+      COOKIST_AUTH_MODE: ${COOKIST_AUTH_MODE:-demo}
+      COOKIST_COGNITO_ISSUER: ${COOKIST_COGNITO_ISSUER:-}
+      COOKIST_COGNITO_CLIENT_IDS: ${COOKIST_COGNITO_CLIENT_IDS:-}
     expose: ["8081"]
-    restart: unless-stopped
-  search:
-    build:
-      context: .
-      dockerfile: services/search/Dockerfile
-    environment:
-      HOST: 0.0.0.0
-      PORT: 8082
-      CORE_URL: http://core:8081
-    depends_on: [core]
-    expose: ["8082"]
     restart: unless-stopped
   gateway:
     build:
       context: .
       dockerfile: services/gateway/Dockerfile
+      args:
+        VITE_AUTH_MODE: ${COOKIST_AUTH_MODE:-demo}
+        VITE_COGNITO_ISSUER: ${COOKIST_COGNITO_ISSUER:-}
+        VITE_COGNITO_CLIENT_ID: ${VITE_COGNITO_CLIENT_ID:-}
+        VITE_COGNITO_DOMAIN: ${VITE_COGNITO_DOMAIN:-}
     environment:
       HOST: 0.0.0.0
       PORT: 8080
       CORE_URL: http://core:8081
-      SEARCH_URL: http://search:8082
       WEB_DIST: /app/web
-    depends_on: [core, search]
+      COOKIST_AUTH_MODE: ${COOKIST_AUTH_MODE:-demo}
+    depends_on: [core]
     ports: ["127.0.0.1:8080:8080"]
     restart: unless-stopped
-volumes:
-  cookist-data:

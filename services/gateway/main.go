@@ -45,12 +45,8 @@ func proxyFor(raw string) (*httputil.ReverseProxy, *url.URL, error) {
 	return proxy, target, nil
 }
 
-func newGateway(coreURL, searchURL, webDist string, origins []string) (http.Handler, error) {
+func newGateway(coreURL, webDist string, origins []string) (http.Handler, error) {
 	core, coreTarget, err := proxyFor(coreURL)
-	if err != nil {
-		return nil, err
-	}
-	search, searchTarget, err := proxyFor(searchURL)
 	if err != nil {
 		return nil, err
 	}
@@ -83,37 +79,27 @@ func newGateway(coreURL, searchURL, webDist string, origins []string) (http.Hand
 				jsonError(w, 405, "method_not_allowed", "Use GET.")
 				return
 			}
-			for _, target := range []*url.URL{coreTarget, searchTarget} {
-				ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
-				req, requestErr := http.NewRequestWithContext(ctx, http.MethodGet, target.String()+"/health", nil)
-				if requestErr != nil {
-					cancel()
-					jsonError(w, 503, "not_ready", "Invalid service health configuration.")
-					return
-				}
-				res, requestErr := client.Do(req)
-				if requestErr != nil {
-					cancel()
-					jsonError(w, 503, "not_ready", "Cookist services are starting or unavailable.")
-					return
-				}
-				res.Body.Close()
+			ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
+			req, requestErr := http.NewRequestWithContext(ctx, http.MethodGet, coreTarget.String()+"/health", nil)
+			if requestErr != nil {
 				cancel()
-				if res.StatusCode != 200 {
-					jsonError(w, 503, "not_ready", "A Cookist service is not ready.")
-					return
-				}
+				jsonError(w, 503, "not_ready", "Invalid service health configuration.")
+				return
+			}
+			res, requestErr := client.Do(req)
+			if requestErr != nil {
+				cancel()
+				jsonError(w, 503, "not_ready", "Cookist services are starting or unavailable.")
+				return
+			}
+			res.Body.Close()
+			cancel()
+			if res.StatusCode != 200 {
+				jsonError(w, 503, "not_ready", "A Cookist service is not ready.")
+				return
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte("{\"status\":\"ok\"}\n"))
-			return
-		}
-		if r.URL.Path == "/api/search" {
-			if r.Method != http.MethodGet {
-				jsonError(w, 405, "method_not_allowed", "Search only supports GET.")
-				return
-			}
-			search.ServeHTTP(w, r)
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/api" {
@@ -158,6 +144,55 @@ func newGateway(coreURL, searchURL, webDist string, origins []string) (http.Hand
 	}), nil
 }
 
+func requireCognito(next http.Handler, coreURL string) (http.Handler, error) {
+	target, err := url.Parse(coreURL)
+	if err != nil || target.Host == "" || (target.Scheme != "http" && target.Scheme != "https") || target.User != nil {
+		return nil, fmt.Errorf("invalid core URL")
+	}
+	target.Path = strings.TrimRight(target.Path, "/") + "/api/me"
+	target.RawQuery = ""
+	client := &http.Client{Timeout: 6 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		clean := path.Clean("/" + r.URL.Path)
+		if !(clean == "/api" || strings.HasPrefix(clean, "/api/")) || r.Method == http.MethodOptions {
+			next.ServeHTTP(w, r)
+			return
+		}
+		authorization := r.Header.Get("Authorization")
+		if !strings.HasPrefix(authorization, "Bearer ") || len(authorization) > 16384 {
+			jsonError(w, 401, "unauthorized", "Sign in to continue.")
+			return
+		}
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, target.String(), nil)
+		if err != nil {
+			jsonError(w, 503, "auth_unavailable", "Authentication is unavailable.")
+			return
+		}
+		req.Header.Set("Authorization", authorization)
+		response, err := client.Do(req)
+		if err != nil {
+			log.Printf("authentication service unavailable: %v", err)
+			jsonError(w, 503, "auth_unavailable", "Authentication is unavailable.")
+			return
+		}
+		response.Body.Close()
+		switch response.StatusCode {
+		case http.StatusOK:
+			w.Header().Set("Cache-Control", "private, no-store")
+			next.ServeHTTP(w, r)
+		case http.StatusUnauthorized:
+			jsonError(w, 401, "unauthorized", "Sign in to continue.")
+		case http.StatusForbidden:
+			jsonError(w, 403, "forbidden", "This account cannot access Cookist.")
+		default:
+			log.Printf("authentication service returned unexpected status %d", response.StatusCode)
+			jsonError(w, 503, "auth_unavailable", "Authentication is unavailable.")
+		}
+	}), nil
+}
+
 func env(key, fallback string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
@@ -166,13 +201,23 @@ func env(key, fallback string) string {
 }
 
 func main() {
+	coreURL := env("CORE_URL", "http://127.0.0.1:8081")
 	handler, err := newGateway(
-		env("CORE_URL", "http://127.0.0.1:8081"), env("SEARCH_URL", "http://127.0.0.1:8082"),
-		env("WEB_DIST", "apps/web/dist"),
+		coreURL, env("WEB_DIST", "apps/web/dist"),
 		strings.Split(env("ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080"), ","),
 	)
 	if err != nil {
 		log.Fatal(err)
+	}
+	switch env("COOKIST_AUTH_MODE", "demo") {
+	case "demo":
+	case "cognito":
+		handler, err = requireCognito(handler, coreURL)
+		if err != nil {
+			log.Fatal(err)
+		}
+	default:
+		log.Fatal("COOKIST_AUTH_MODE must be demo or cognito")
 	}
 	server := &http.Server{
 		Addr: env("HOST", "127.0.0.1") + ":" + env("PORT", "8080"), Handler: handler,

@@ -11,7 +11,7 @@ import org.jose4j.keys.resolvers.HttpsJwksVerificationKeyResolver
 import org.jose4j.keys.resolvers.VerificationKeyResolver
 import java.security.MessageDigest
 
-internal data class CognitoIdentity(val subject: String, val role: String, val storeId: String? = null)
+internal data class CognitoIdentity(val subject: String)
 
 internal class CognitoAuth private constructor(
     private val consumer: JwtConsumer,
@@ -41,21 +41,7 @@ internal class CognitoAuth private constructor(
                 subject == null || subject.isBlank() || subject.length > 255 || subject.any { it.isISOControl() }) {
                 throw ApiError(401, "unauthorized", "Invalid access token")
             }
-            val groups = if (claims.hasClaim("cognito:groups"))
-                claims.getStringListClaimValue("cognito:groups") ?: throw ApiError(401, "unauthorized", "Invalid access token")
-            else emptyList()
-            val privilegedGroups = groups.filter { it == "cookist-courier" || it.startsWith("cookist-merchant-") }
-            if (privilegedGroups.size > 1) throw ApiError(403, "forbidden", "Account has conflicting role assignments")
-            val group = privilegedGroups.singleOrNull()
-            return when {
-                group == "cookist-courier" -> CognitoIdentity("$actorPrefix$subject", "courier")
-                group != null -> {
-                    val storeId = group.removePrefix("cookist-merchant-")
-                    if (!storeId.matches(Regex("[a-z0-9-]{1,100}"))) throw ApiError(403, "forbidden", "Invalid merchant assignment")
-                    CognitoIdentity("$actorPrefix$subject", "merchant", storeId)
-                }
-                else -> CognitoIdentity("$actorPrefix$subject", "customer")
-            }
+            return CognitoIdentity("$actorPrefix$subject")
         } catch (_: InvalidJwtException) {
             throw ApiError(401, "unauthorized", "Invalid access token")
         } catch (_: MalformedClaimException) {
