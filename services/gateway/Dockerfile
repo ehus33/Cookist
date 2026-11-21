@@ -8,11 +8,11 @@ ARG VITE_AUTH_MODE=demo
 ARG VITE_COGNITO_ISSUER
 ARG VITE_COGNITO_CLIENT_ID
 ARG VITE_COGNITO_DOMAIN
-COPY package.json package-lock.json ./
+COPY package.json yarn.lock ./
 COPY apps/web/package.json apps/web/package.json
-RUN npm ci
+RUN yarn install --frozen-lockfile --non-interactive
 COPY apps/web apps/web
-RUN npm run build
+RUN yarn build
 FROM alpine:3.21
 WORKDIR /app
 COPY --from=build /gateway /usr/local/bin/gateway

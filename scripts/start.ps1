@@ -16,8 +16,8 @@ function Run-Checked([scriptblock]$Command) {
 }
 
 if (-not $SkipBuild) {
-    if (-not (Test-Path -LiteralPath 'node_modules')) { Run-Checked { npm ci } }
-    Run-Checked { npm run build }
+    Run-Checked { yarn install --frozen-lockfile --non-interactive }
+    Run-Checked { yarn build }
     Run-Checked { & "$PSScriptRoot\gradle.ps1" -ProjectDir 'services\core' installDist }
     if (-not (Test-Path -LiteralPath '.tools')) { New-Item -ItemType Directory -Path '.tools' | Out-Null }
     Push-Location 'services\gateway'

@@ -9,14 +9,14 @@ experimental authentication have not been deployed or verified end to end.
 
 ## Run on Windows
 
-Requires Node.js 22.12+ (or 24+), npm, JDK 17, and Go 1.24+. Run:
+Requires Node.js 22.12+ (or 24+), Yarn 1.22.22, JDK 17, and Go 1.24+. Run:
 
 ```powershell
 .\scripts\start.ps1
 ```
 
 Open http://localhost:8080. For a frontend development server, run
-`npm run dev` in another terminal. Vite proxies API requests to the gateway.
+`yarn dev` in another terminal. Vite proxies API requests to the gateway.
 Copy [.env.example](.env.example) to `.env` for optional local configuration;
 do not commit populated secrets.
 
@@ -55,8 +55,8 @@ short access-token lifetimes.
 ## Validation
 
 ```powershell
-npm test
-npm run build
+yarn test
+yarn build
 Push-Location services\gateway; go test ./...; Pop-Location
 .\scripts\gradle.ps1 -ProjectDir services\core test
 .\scripts\test-env.ps1
@@ -64,3 +64,15 @@ Push-Location services\gateway; go test ./...; Pop-Location
 
 See the native app READMEs for platform-specific setup. Building iOS requires
 macOS and Xcode.
+
+## Release notes
+
+Install dependencies with `yarn install --frozen-lockfile`. Run `yarn changeset`
+to record each change and commit the
+resulting file in `.changeset`. Choose a major, minor, or patch bump according
+to the change. The private `@cookist/web` workspace is the release-note unit for
+the app; Changesets does not independently version the native apps or services.
+
+Only when preparing a release, run `yarn changeset version` to consume pending
+changesets and generate the workspace changelog. Review and commit the version
+and changelog changes. This does not deploy the app or publish a package.
