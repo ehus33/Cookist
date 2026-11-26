@@ -48,6 +48,7 @@ type deploymentWorker struct {
 	coreURL, owner, root, terraform, account string
 	accessFile                               string
 	localAccess                              bool
+	billing                                  *stripeBilling
 	client                                   *http.Client
 	mu                                       sync.Mutex
 	execute                                  func(context.Context, string, io.Writer, ...string) ([]byte, error)

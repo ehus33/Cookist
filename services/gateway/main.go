@@ -74,6 +74,14 @@ func newGateway(coreURL, webDist string, origins []string, deployments *deployme
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
+		if r.URL.Path == "/api/billing/webhook" {
+			if deployments == nil {
+				jsonError(w, 503, "billing_unavailable", "Billing is not configured.")
+			} else {
+				deployments.billingRoute(w, r)
+			}
+			return
+		}
 		if r.URL.Path == "/health" {
 			if r.Method != http.MethodGet {
 				jsonError(w, 405, "method_not_allowed", "Use GET.")
@@ -108,6 +116,14 @@ func newGateway(coreURL, webDist string, origins []string, deployments *deployme
 				return
 			}
 			r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+			if strings.HasPrefix(r.URL.Path, "/api/billing/") {
+				if deployments == nil {
+					jsonError(w, 503, "billing_unavailable", "Billing is not configured.")
+				} else {
+					deployments.billingRoute(w, r)
+				}
+				return
+			}
 			if r.URL.Path == "/api/deployment-access" || r.URL.Path == "/api/deployments" || strings.HasPrefix(r.URL.Path, "/api/deployments/") {
 				if deployments == nil {
 					jsonError(w, 503, "deployments_disabled", "Deployments are not configured on this server.")
@@ -164,7 +180,8 @@ func requireCognito(next http.Handler, coreURL string) (http.Handler, error) {
 	}}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		clean := path.Clean("/" + r.URL.Path)
-		if !(clean == "/api" || strings.HasPrefix(clean, "/api/")) || r.Method == http.MethodOptions {
+		if !(clean == "/api" || strings.HasPrefix(clean, "/api/")) || r.Method == http.MethodOptions ||
+			(r.URL.Path == "/api/billing/webhook" && r.Method == http.MethodPost) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -236,6 +253,22 @@ func main() {
 		}
 	default:
 		log.Fatal("COOKIST_DEPLOYMENTS_ENABLED must be true or false")
+	}
+	switch env("COOKIST_BILLING_ENABLED", "false") {
+	case "false":
+	case "true":
+		if deployments == nil {
+			log.Fatal("Stripe billing requires the deployment worker to be enabled")
+		}
+		deployments.billing, err = newStripeBilling(
+			filepath.Join(deployments.root, ".billing"), os.Getenv("COOKIST_PUBLIC_ORIGIN"),
+			os.Getenv("COOKIST_STRIPE_PRICE_ID"), os.Getenv("COOKIST_STRIPE_SECRET_KEY"),
+			os.Getenv("COOKIST_STRIPE_WEBHOOK_SECRET"), env("COOKIST_STRIPE_MODE", "test"))
+		if err != nil {
+			log.Fatal(err)
+		}
+	default:
+		log.Fatal("COOKIST_BILLING_ENABLED must be true or false")
 	}
 	handler, err := newGateway(
 		coreURL, env("WEB_DIST", "apps/web/dist"),

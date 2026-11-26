@@ -98,11 +98,12 @@ Replace the placeholder with the verified actor ID. Roles are `customer_admin`,
 `deployer`, and `viewer`. All members can list only their tenant's deployments.
 Customer admins and deployers can create with an active entitlement and delete
 completed deployments belonging to that tenant; viewers cannot mutate resources.
-Customer-admin membership does not grant platform administration or a billing
-management API. Membership changes remain operator-managed in this initial version.
+Customer-admin membership does not grant platform administration. When Stripe is
+configured, only customer admins can open their tenant's checkout and billing
+portal. Membership changes remain operator-managed.
 Each identity belongs to one tenant; `owner` is reserved for legacy owner resources.
 
-To grant an active entitlement, use `"subscriptionStatus": "active"` and a
+Without Stripe enabled, to grant an active entitlement, use `"subscriptionStatus": "active"` and a
 `"validUntil"` RFC3339 UTC timestamp. Creation is denied at expiry. Inactive
 entitlements must omit `validUntil`. Viewing and authorized deletion remain
 available after expiry to allow cost cleanup. Unknown identities are denied.
@@ -124,11 +125,10 @@ not rewritten. Cross-tenant deletion returns HTTP 404. Tenant quotas include
 running/failed/retained deployments and are checked under the same exclusive
 worker lock as the global cap. Unverifiable ownership blocks customer creation.
 
-This implements authorization and an entitlement gate, **not payment collection**.
-There is no checkout or webhook yet; do not claim subscriptions are purchased
-or verified by this file. A future billing integration must verify signed payment
-webhooks and update trusted entitlement storage, not accept checkout redirects,
-client-supplied subscription flags, roles, or tenant IDs. The shared worker AWS
+The access-policy file manages membership and quotas, **not payment collection**.
+When Stripe is enabled, Stripe-derived entitlement records override manual
+subscription grants for hosted customers. Neither checkout redirects nor
+client-supplied subscription flags, roles, or tenant IDs grant access. The shared worker AWS
 identity is unchanged: this is application-level isolation, not separate AWS
 accounts, per-tenant IAM identities, or a production multi-tenant security boundary.
 
@@ -159,8 +159,124 @@ published host port is loopback-only.
 
 This gates the Cookist application, not the generated public S3/CloudFront
 sites. Previously shared site URLs remain public until resources are deleted.
-No checkout, pricing or verified payment integration is enabled by this setting;
-entitlement grants remain operator-managed until billing is implemented.
+This setting alone does not configure payment collection; use the separate
+Stripe integration below.
+
+### Stripe subscription paywall
+
+Cookist uses Stripe's official Go SDK, hosted subscription Checkout and Customer
+Portal. Card details never enter Cookist. Billing is disabled by default and
+requires an enabled, Cognito-authenticated deployment worker. Nothing is charged
+by installing this code.
+
+1. Start in Stripe **test mode**. Create an active, fixed recurring, licensed
+   subscription price. Set `COOKIST_STRIPE_PRICE_ID` to its `price_...` identifier.
+   Stripe displays the actual configured price/currency in Checkout; Cookist does
+   not invent a price or accept one from the browser.
+2. Set private gateway runtime values `COOKIST_BILLING_ENABLED=true`,
+   `COOKIST_STRIPE_MODE=test`, `COOKIST_STRIPE_SECRET_KEY=sk_test_...`,
+   `COOKIST_STRIPE_WEBHOOK_SECRET=whsec_...`, and
+   `COOKIST_PUBLIC_ORIGIN` to the exact HTTPS application origin (no path or
+   trailing slash). Test mode also permits explicit loopback HTTP IP origins.
+   Configure `ALLOWED_ORIGINS` separately for that origin. Never put secret keys
+   in `VITE_` variables, browser code, build arguments or committed files.
+3. Configure Stripe Customer Portal for subscription/payment-method management.
+   Keep quantity fixed at one and price changes disabled unless the operator
+   updates Cookist's configured price. A canceled subscription can be purchased
+   again; an existing active, trialing, paused, past-due, unpaid or incomplete
+   subscription blocks duplicate checkout. Use the portal to resolve billing;
+   an operator may need to resolve/cancel an incomplete payment in Stripe first.
+4. Register a **snapshot** webhook endpoint at
+   `https://<webhook-host>/api/billing/webhook`, using API version
+   `2026-11-18.endive` (the installed Stripe SDK's API version). Subscribe to
+   `checkout.session.completed`, `checkout.session.async_payment_succeeded`,
+   `checkout.session.async_payment_failed`, `customer.subscription.created`,
+   `customer.subscription.updated`, `customer.subscription.deleted`,
+   `invoice.paid`, and `invoice.payment_failed`. Copy that endpoint's signing
+   secret into private runtime configuration. Raw-body signatures, timestamp,
+   mode, API version and customer mapping are verified; connected-account events
+   are not supported. Do not disable these checks.
+5. Provision verified Cognito actors as `customer_admin`, `deployer` or `viewer`
+   in the access policy, including their tenant quota. Self-registration does
+   not create a tenant or grant checkout rights. Customer admins select
+   **Subscribe with Stripe**, then follow the secure Checkout link. Only a paid
+   invoice on an active subscription with the configured price and quantity one
+   unlocks that tenant until its paid period ends. No trial/grace access is
+   granted. Returning from Checkout is not evidence of payment: the existing
+   permission polling displays access only after a verified webhook refreshes
+   authoritative Stripe state. Owner and explicit local access remain exempt.
+
+**Private hosting caveat:** the existing Tailscale-private site cannot receive
+Stripe's public webhook delivery. Live billing is not ready until a separately
+authorized, public HTTPS ingress forwards **only POST `/api/billing/webhook`**
+to the gateway, preserving the raw body and `Stripe-Signature`, with a 1 MB body
+limit. Do not expose the whole private app or use a local-bypass gateway. For
+development, use Stripe CLI forwarding to a private/loopback test gateway and
+the CLI's own signing secret. No public ingress is created by this integration.
+
+Customer/checkout mappings and entitlement records are stored privately under
+`<deployment-state>/.billing/<test|live>` in the durable deployment volume.
+Back up this directory along with deployment state; do not delete it when
+cleaning up sites. Test/live mappings are separate. Requests are serialized by
+per-tenant lock files; Checkout uses persisted Stripe idempotency keys and reuses
+open sessions. Duplicate/out-of-order webhooks re-fetch current subscriptions
+instead of applying stale event snapshots. Stripe/storage errors fail explicitly
+and webhook errors are retried, rather than granting access.
+
+If the worker crashes holding a billing lock, stop all gateway instances, verify
+there is no active billing request, then have the operator remove only the
+affected tenant's `.lock` file before restarting. Do not remove customer records.
+If changing the configured price while an older Checkout is open, first expire
+that session in Stripe; Cookist rejects the old-price session rather than
+charging an unintended price. Price changes do not migrate subscriptions.
+Missed webhooks may leave the last confirmed grant valid until its paid expiry;
+monitor webhook delivery and retry failed events. Expired/unpaid members retain
+role-authorized deployment listing and cleanup so the paywall does not trap AWS
+resources. Stripe payments do not cover or cap underlying AWS usage charges.
+
+After verifying Checkout, renewals, cancellation and portal behavior in test
+mode, configure separate live keys, price, webhook endpoint/signing secret and
+`COOKIST_STRIPE_MODE=live`. This repository does not supply those credentials,
+create a Stripe account, configure public ingress or deploy the integration.
+
+#### Current hosted webhook ingress
+
+The existing Lightsail proxy now has a manually configured, public HTTPS
+webhook-only entrance:
+
+```text
+https://ip-172-26-9-217.tail18ecfa.ts.net:8443/api/billing/webhook
+```
+
+Tailscale Funnel on port 8443 forwards to an Nginx listener bound only to
+`127.0.0.1:18084`. That listener forwards only the exact, query-free
+`POST /api/billing/webhook` path to the private worker. Other paths return 404;
+other methods on the webhook path return 405. Nginx preserves the request body
+and Stripe signature header, rejects bodies larger than 1 MiB, and rate-limits
+the ingress to 10 requests/second with a burst of 20. No AWS firewall ports or
+new AWS resources were added. The existing application stays private on port
+443; port 8443 avoids replacing its HTTPS listener.
+
+Funnel permission is restricted to `tag:cookist-webhook`, assigned only to the
+Lightsail proxy. The owner's existing SSH access and other network grants were
+preserved. Funnel is beta and subject to bandwidth limits; monitor Stripe's
+delivery retries. Nginx and Tailscale are enabled services, and the Funnel
+configuration is persistent.
+
+**Only the ingress is live.** The gateway still runs the earlier cleanup release,
+not the Stripe billing build, so forwarded webhook POSTs currently return 401.
+Finish creating the sandbox destination, configure its signing secret plus the
+matching Stripe key and recurring price, and deploy the billing build before
+expecting payment events to grant access. Do not treat a working HTTPS address
+as a working subscription payment flow.
+
+To disable only this public entrance on the Lightsail proxy:
+
+```sh
+sudo tailscale funnel --https=8443 off
+```
+
+This leaves the private application and deployment state unchanged.
 
 Select a commercial AWS Region for the S3 bucket. The list is not filtered by
 account: some regions require opting in before use. CloudFront is global.

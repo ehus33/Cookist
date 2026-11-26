@@ -31,15 +31,17 @@ type accessPolicy struct {
 }
 
 type deploymentAccess struct {
-	ActorID         string `json:"-"`
-	TenantID        string `json:"tenantId,omitempty"`
-	Role            string `json:"role"`
-	Subscribed      bool   `json:"subscribed"`
-	Limit           int    `json:"deploymentLimit"`
-	CanList         bool   `json:"canList"`
-	CanCreate       bool   `json:"canCreate"`
-	CanDelete       bool   `json:"canDelete"`
-	PaymentRequired bool   `json:"paymentRequired"`
+	ActorID          string `json:"-"`
+	TenantID         string `json:"tenantId,omitempty"`
+	Role             string `json:"role"`
+	Subscribed       bool   `json:"subscribed"`
+	Limit            int    `json:"deploymentLimit"`
+	CanList          bool   `json:"canList"`
+	CanCreate        bool   `json:"canCreate"`
+	CanDelete        bool   `json:"canDelete"`
+	PaymentRequired  bool   `json:"paymentRequired"`
+	CanCheckout      bool   `json:"canCheckout"`
+	CanManageBilling bool   `json:"canManageBilling"`
 }
 
 var tenantPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
@@ -148,10 +150,21 @@ func (w *deploymentWorker) accessFor(actor string) (deploymentAccess, error) {
 		subscribed = time.Now().Before(expires)
 	}
 	canManage := member.Role == "customer_admin" || member.Role == "deployer"
+	canCheckout, canManageBilling := false, false
+	if w.billing != nil && !w.localAccess {
+		record, err := w.billing.read(member.TenantID)
+		if err != nil {
+			return deploymentAccess{}, err
+		}
+		subscribed = record.PriceID == w.billing.price && record.ValidUntil > time.Now().Unix()
+		canCheckout = member.Role == "customer_admin" && !record.HasSubscription
+		canManageBilling = member.Role == "customer_admin" && record.CustomerID != ""
+	}
 	return deploymentAccess{ActorID: actor, TenantID: member.TenantID, Role: member.Role,
 		Subscribed: subscribed, Limit: tenant.DeploymentLimit, CanList: true,
 		CanCreate: canManage && (subscribed || w.localAccess), CanDelete: canManage,
-		PaymentRequired: !subscribed && !w.localAccess}, nil
+		PaymentRequired: !subscribed && !w.localAccess,
+		CanCheckout:     canCheckout, CanManageBilling: canManageBilling}, nil
 }
 
 func (a deploymentAccess) check(action string, d *deployment) error {

@@ -5,7 +5,7 @@ import type { Session } from './types';
 
 type DeploymentTemplate = 'blank' | 'business';
 type Deployment = { id: string; name: string; region: string; status: 'running' | 'ready' | 'failed' | 'deleting' | 'cleanup_failed'; url?: string };
-type DeploymentAccess = { role: string; subscribed: boolean; paymentRequired: boolean; canList: boolean; canCreate: boolean; canDelete: boolean };
+type DeploymentAccess = { role: string; subscribed: boolean; paymentRequired: boolean; canList: boolean; canCreate: boolean; canDelete: boolean; canCheckout?: boolean; canManageBilling?: boolean };
 
 function isDeploymentAccess(value: unknown): value is DeploymentAccess {
   if (!value || typeof value !== 'object') return false;
@@ -14,7 +14,9 @@ function isDeploymentAccess(value: unknown): value is DeploymentAccess {
     && ['platform_owner', 'customer_admin', 'deployer', 'viewer', 'none'].includes(access.role)
     && typeof access.subscribed === 'boolean' && typeof access.canList === 'boolean'
     && typeof access.canCreate === 'boolean' && typeof access.canDelete === 'boolean'
-    && typeof access.paymentRequired === 'boolean';
+    && typeof access.paymentRequired === 'boolean'
+    && (access.canCheckout === undefined || typeof access.canCheckout === 'boolean')
+    && (access.canManageBilling === undefined || typeof access.canManageBilling === 'boolean');
 }
 
 function isDeployment(value: unknown): value is Deployment {
@@ -80,6 +82,8 @@ export function App({ authenticatedSession, onSignOut, authError }: {
   const [deleteTarget, setDeleteTarget] = useState<Deployment | null>(null);
   const [access, setAccess] = useState<DeploymentAccess | null>(null);
   const [loadedActor, setLoadedActor] = useState<string | null>(null);
+  const [billingPending, setBillingPending] = useState(false);
+  const [billingLink, setBillingLink] = useState<{ url: string; portal: boolean } | null>(null);
   const currentAccess = loadedActor === authenticatedSession?.actorId ? access : null;
   const visibleDeployments = loadedActor === authenticatedSession?.actorId ? deployments : [];
   const newDeploymentButton = useRef<HTMLButtonElement>(null);
@@ -98,6 +102,8 @@ export function App({ authenticatedSession, onSignOut, authError }: {
     setLoadError('');
     setSubmitting(false);
     setDeleting(null);
+    setBillingPending(false);
+    setBillingLink(null);
     if (!authenticatedSession) return;
     const session = authenticatedSession;
     const controller = new AbortController();
@@ -118,6 +124,7 @@ export function App({ authenticatedSession, onSignOut, authError }: {
           setLoadedActor(session.actorId);
           if (!permissions.canCreate) setCreating(false);
           if (!permissions.canDelete) setDeleteTarget(null);
+          if (!permissions.canCheckout && !permissions.canManageBilling) setBillingLink(null);
           setLoadError('');
         }
       } catch (error) {
@@ -126,6 +133,7 @@ export function App({ authenticatedSession, onSignOut, authError }: {
           setDeployments([]);
           setCreating(false);
           setDeleteTarget(null);
+          setBillingLink(null);
           setLoadError(errorMessage(error));
         }
       } finally {
@@ -194,6 +202,31 @@ export function App({ authenticatedSession, onSignOut, authError }: {
     }
   }
 
+  async function startBilling(portal: boolean) {
+    if (!authenticatedSession || billingPending ||
+      !(portal ? currentAccess?.canManageBilling : currentAccess?.canCheckout)) return;
+    const version = sessionVersion.current;
+    setBillingPending(true);
+    setBillingLink(null);
+    setMessage(null);
+    try {
+      const result = await api<unknown>(`/api/billing/${portal ? 'portal' : 'checkout'}`, authenticatedSession, { method: 'POST' });
+      if (version !== sessionVersion.current) return;
+      if (!result || typeof result !== 'object' || !('url' in result) || typeof result.url !== 'string') {
+        throw new Error('The server returned an invalid billing link.');
+      }
+      const url = new URL(result.url);
+      if (url.protocol !== 'https:' || url.host !== (portal ? 'billing.stripe.com' : 'checkout.stripe.com') || url.username || url.password) {
+        throw new Error('The server returned an invalid Stripe URL.');
+      }
+      setBillingLink({ url: result.url, portal });
+    } catch (error) {
+      if (version === sessionVersion.current) setMessage({ text: `Could not start billing: ${errorMessage(error)}`, error: true });
+    } finally {
+      if (version === sessionVersion.current) setBillingPending(false);
+    }
+  }
+
   return <main className="workspace">
     <header>
       <div>
@@ -221,8 +254,19 @@ export function App({ authenticatedSession, onSignOut, authError }: {
         <h3>Paid access required</h3>
         <p className="deployment-notice">An active subscription is required to use deployment features.
           Existing deployment records remain available for recovery and, if your role permits,
-          deletion to stop further usage charges. Checkout is not available yet; contact the operator.</p>
+          deletion to stop further usage charges.
+          {!currentAccess.canCheckout && !currentAccess.canManageBilling && ' Ask your organization administrator to arrange payment.'}</p>
       </section>}
+      {currentAccess?.canCheckout && <button type="button" disabled={billingPending} onClick={() => void startBilling(false)}>
+        {billingPending ? 'Preparing billing...' : 'Subscribe with Stripe'}
+      </button>}
+      {currentAccess?.canManageBilling && <button type="button" disabled={billingPending} onClick={() => void startBilling(true)}>
+        Manage billing
+      </button>}
+      {billingLink && currentAccess && <p>
+        <a href={billingLink.url} rel="noreferrer">{billingLink.portal ? 'Continue to Stripe billing portal' : 'Continue to secure Stripe checkout'}</a>
+        {!billingLink.portal && ' Access unlocks only after Stripe confirms payment, not when you return from checkout.'}
+      </p>}
       {currentAccess?.role === 'viewer' && <p className="deployment-notice">Your role provides read-only deployment access.</p>}
       {loadError && <p role="alert">{loadError}</p>}
       {visibleDeployments.length > 0 && <ul className="deployment-list">

@@ -1,5 +1,17 @@
 # @cookist/web
 
+## 1.5.0
+
+### Minor Changes
+
+- Add Stripe-hosted subscription Checkout and Customer Portal for tenant administrators, backed by verified signed webhooks and durable tenant billing records. Preserve owner/local exemptions, RBAC/ABAC, and expired-subscription cleanup. Stripe credentials, a recurring price, and reachable webhook ingress must be configured separately before live payments are available.
+
+## 1.4.0
+
+### Minor Changes
+
+- cae1f9a: Enforce hosted entitlement notices and hide site links for unpaid customers while retaining authorized resource cleanup. Add an explicit loopback-only local subscription bypass that preserves authentication, roles, tenant isolation, and quotas. Payment checkout is not included.
+
 ## 1.3.0
 
 ### Minor Changes

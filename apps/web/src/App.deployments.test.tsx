@@ -11,6 +11,64 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+it('opens only server-owned Stripe checkout and does not unlock on return', async () => {
+  const admin = { token: 'admin-token', actorId: 'admin' };
+  const access = { role: 'customer_admin', subscribed: false, paymentRequired: true,
+    canList: true, canCreate: false, canDelete: true, canCheckout: true, canManageBilling: false };
+  const api = vi.spyOn(apiModule, 'api').mockImplementation(async (path) => {
+    if (path === '/api/deployment-access') return access;
+    if (path === '/api/billing/checkout') return { url: 'https://checkout.stripe.com/c/pay/test' };
+    return [];
+  });
+  window.history.replaceState(null, '', '/?billing=returned');
+  try {
+    render(<App authenticatedSession={admin} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Subscribe with Stripe' }));
+    expect(await screen.findByRole('link', { name: 'Continue to secure Stripe checkout' })).toHaveAttribute('href', 'https://checkout.stripe.com/c/pay/test');
+    expect(api).toHaveBeenCalledWith('/api/billing/checkout', admin, { method: 'POST' });
+    expect(screen.getByRole('button', { name: 'New deployment' })).toBeDisabled();
+    expect(screen.getByRole('heading', { name: 'Paid access required' })).toBeInTheDocument();
+  } finally {
+    window.history.replaceState(null, '', '/');
+  }
+});
+
+it('opens the customer portal and rejects unexpected billing URLs', async () => {
+  const access = { ...ownerAccess, role: 'customer_admin', canCheckout: false, canManageBilling: true };
+  const api = vi.spyOn(apiModule, 'api').mockImplementation(async (path) => {
+    if (path === '/api/deployment-access') return access;
+    if (path === '/api/billing/portal') return { url: 'https://billing.stripe.com/p/session/test' };
+    return [];
+  });
+  render(<App authenticatedSession={session} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Manage billing' }));
+  expect(await screen.findByRole('link', { name: 'Continue to Stripe billing portal' })).toHaveAttribute('href', 'https://billing.stripe.com/p/session/test');
+  api.mockImplementation(async (path) => {
+    if (path === '/api/deployment-access') return access;
+    if (path === '/api/billing/portal') return { url: 'https://billing.stripe.com.attacker.example/steal' };
+    return [];
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Manage billing' }));
+  expect(await screen.findByRole('alert')).toHaveTextContent('invalid Stripe URL');
+  expect(screen.queryByRole('link', { name: 'Continue to Stripe billing portal' })).not.toBeInTheDocument();
+});
+
+it('ignores late checkout results after switching accounts', async () => {
+  const access = { ...ownerAccess, role: 'customer_admin', subscribed: false, paymentRequired: true,
+    canCreate: false, canCheckout: true, canManageBilling: false };
+  let finish!: (value: { url: string }) => void;
+  vi.spyOn(apiModule, 'api').mockImplementation(async (path, currentSession) => {
+    if (path === '/api/deployment-access') return currentSession?.actorId === 'owner' ? access : ownerAccess;
+    if (path === '/api/billing/checkout') return new Promise<{ url: string }>((resolve) => { finish = resolve; });
+    return [];
+  });
+  const { rerender } = render(<App authenticatedSession={session} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Subscribe with Stripe' }));
+  rerender(<App authenticatedSession={{ token: 'other-token', actorId: 'other' }} />);
+  await act(async () => { finish({ url: 'https://checkout.stripe.com/c/pay/old-account' }); });
+  expect(screen.queryByRole('link', { name: 'Continue to secure Stripe checkout' })).not.toBeInTheDocument();
+});
+
 it('submits the selected business site and displays its deployment status', async () => {
   const api = vi.spyOn(apiModule, 'api').mockImplementation(async (_path, _session, options) => {
     if (_path === '/api/deployment-access') return ownerAccess;
@@ -119,7 +177,7 @@ it('allows expired deployers to clean up but not create and keeps viewers read-o
     const { rerender } = render(<App authenticatedSession={session} />);
     expect(await screen.findByRole('button', { name: 'Delete Site' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'New deployment' })).toBeDisabled();
-    expect(screen.getByText(/Checkout is not available yet/)).toBeInTheDocument();
+    expect(screen.getByText(/Ask your organization administrator/)).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Open site' })).not.toBeInTheDocument();
     api.mockImplementation(async path => {
       if (path === '/api/deployment-access') return {
