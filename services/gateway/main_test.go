@@ -18,7 +18,7 @@ func TestRoutingAndCredentialForwarding(t *testing.T) {
 		_, _ = w.Write([]byte("core"))
 	}))
 	defer core.Close()
-	handler, err := newGateway(core.URL, t.TempDir(), nil)
+	handler, err := newGateway(core.URL, t.TempDir(), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +32,7 @@ func TestRoutingAndCredentialForwarding(t *testing.T) {
 }
 
 func TestServiceErrorsAndOriginPolicy(t *testing.T) {
-	handler, err := newGateway("http://127.0.0.1:1", t.TempDir(), []string{"http://localhost:5173"})
+	handler, err := newGateway("http://127.0.0.1:1", t.TempDir(), []string{"http://localhost:5173"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestHealthDependsOnCore(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer core.Close()
-	handler, err := newGateway(core.URL, t.TempDir(), nil)
+	handler, err := newGateway(core.URL, t.TempDir(), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func TestHealthDependsOnCore(t *testing.T) {
 }
 
 func TestOversizedBodiesRejectedBeforeProxying(t *testing.T) {
-	handler, err := newGateway("http://127.0.0.1:1", t.TempDir(), nil)
+	handler, err := newGateway("http://127.0.0.1:1", t.TempDir(), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,6 +86,18 @@ func TestOversizedBodiesRejectedBeforeProxying(t *testing.T) {
 	}
 }
 
+func TestDeploymentsDisabledByDefault(t *testing.T) {
+	handler, err := newGateway("http://127.0.0.1:1", t.TempDir(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest("POST", "/api/deployments", nil))
+	if rec.Code != 503 || !strings.Contains(rec.Body.String(), "deployments_disabled") {
+		t.Fatalf("got %d %q", rec.Code, rec.Body.String())
+	}
+}
+
 func TestStaticFallbackDoesNotMaskAPIErrors(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<h1>Cookist</h1>"), 0600); err != nil {
@@ -93,7 +105,7 @@ func TestStaticFallbackDoesNotMaskAPIErrors(t *testing.T) {
 	}
 	upstream := httptest.NewServer(http.NotFoundHandler())
 	defer upstream.Close()
-	handler, err := newGateway(upstream.URL, dir, nil)
+	handler, err := newGateway(upstream.URL, dir, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

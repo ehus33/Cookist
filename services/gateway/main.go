@@ -45,7 +45,7 @@ func proxyFor(raw string) (*httputil.ReverseProxy, *url.URL, error) {
 	return proxy, target, nil
 }
 
-func newGateway(coreURL, webDist string, origins []string) (http.Handler, error) {
+func newGateway(coreURL, webDist string, origins []string, deployments *deploymentWorker) (http.Handler, error) {
 	core, coreTarget, err := proxyFor(coreURL)
 	if err != nil {
 		return nil, err
@@ -108,6 +108,14 @@ func newGateway(coreURL, webDist string, origins []string) (http.Handler, error)
 				return
 			}
 			r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+			if r.URL.Path == "/api/deployments" || strings.HasPrefix(r.URL.Path, "/api/deployments/") {
+				if deployments == nil {
+					jsonError(w, 503, "deployments_disabled", "Deployments are not configured on this server.")
+				} else {
+					deployments.ServeHTTP(w, r)
+				}
+				return
+			}
 			core.ServeHTTP(w, r)
 			return
 		}
@@ -202,14 +210,32 @@ func env(key, fallback string) string {
 
 func main() {
 	coreURL := env("CORE_URL", "http://127.0.0.1:8081")
+	mode := env("COOKIST_AUTH_MODE", "demo")
+	var deployments *deploymentWorker
+	switch env("COOKIST_DEPLOYMENTS_ENABLED", "false") {
+	case "false":
+	case "true":
+		if mode != "cognito" {
+			log.Fatal("deployments require Cognito authentication")
+		}
+		var err error
+		deployments, err = newDeploymentWorker(coreURL, os.Getenv("COOKIST_DEPLOYMENT_OWNER"),
+			os.Getenv("COOKIST_DEPLOYMENT_ROOT"), os.Getenv("COOKIST_TERRAFORM_PATH"), os.Getenv("COOKIST_AWS_ACCOUNT_ID"))
+		if err != nil {
+			log.Fatal(err)
+		}
+	default:
+		log.Fatal("COOKIST_DEPLOYMENTS_ENABLED must be true or false")
+	}
 	handler, err := newGateway(
 		coreURL, env("WEB_DIST", "apps/web/dist"),
 		strings.Split(env("ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080"), ","),
+		deployments,
 	)
 	if err != nil {
 		log.Fatal(err)
 	}
-	switch env("COOKIST_AUTH_MODE", "demo") {
+	switch mode {
 	case "demo":
 	case "cognito":
 		handler, err = requireCognito(handler, coreURL)

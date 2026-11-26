@@ -26,6 +26,16 @@ services:
       CORE_URL: http://core:8081
       WEB_DIST: /app/web
       COOKIST_AUTH_MODE: ${COOKIST_AUTH_MODE:-demo}
+      COOKIST_DEPLOYMENTS_ENABLED: ${COOKIST_DEPLOYMENTS_ENABLED:-false}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080}
+      COOKIST_DEPLOYMENT_OWNER: ${COOKIST_DEPLOYMENT_OWNER:-}
+      COOKIST_DEPLOYMENT_ROOT: /app/deployments
+      COOKIST_TERRAFORM_PATH: /usr/local/bin/terraform
+      COOKIST_AWS_ACCOUNT_ID: ${COOKIST_AWS_ACCOUNT_ID:-}
     depends_on: [core]
     ports: ["127.0.0.1:8080:8080"]
+    volumes: ["deployment-state:/app/deployments"]
     restart: unless-stopped
+
+volumes:
+  deployment-state:
