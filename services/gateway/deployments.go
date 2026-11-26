@@ -47,6 +47,7 @@ const maxTestDeployments = 4
 type deploymentWorker struct {
 	coreURL, owner, root, terraform, account string
 	accessFile                               string
+	localAccess                              bool
 	client                                   *http.Client
 	mu                                       sync.Mutex
 	execute                                  func(context.Context, string, io.Writer, ...string) ([]byte, error)
@@ -668,6 +669,9 @@ func (w *deploymentWorker) list(rw http.ResponseWriter, access deploymentAccess)
 		}
 		if access.Role == "platform_owner" || d.TenantID == access.TenantID {
 			d.CanDelete = access.CanDelete
+			if access.PaymentRequired {
+				d.URL = ""
+			}
 			result = append(result, d)
 		}
 	}

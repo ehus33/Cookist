@@ -132,6 +132,36 @@ client-supplied subscription flags, roles, or tenant IDs. The shared worker AWS
 identity is unchanged: this is application-level isolation, not separate AWS
 accounts, per-tenant IAM identities, or a production multi-tenant security boundary.
 
+### Hosted paywall and local development
+
+`COOKIST_DEPLOYMENT_ACCESS_MODE` defaults to `hosted`, even when the gateway
+binds locally. Hosted mode requires active entitlements for customer deployment
+features; the platform owner remains exempt. Unpaid customers see a paid-access
+notice instead of creation controls/site links. The backend omits site URLs for
+unpaid members. Recovery records and role-authorized cleanup remain accessible
+after expiry so the paywall cannot trap billable resources.
+
+For trusted native local development only, explicitly set:
+
+```dotenv
+HOST=127.0.0.1
+COOKIST_DEPLOYMENT_ACCESS_MODE=local
+```
+
+Local mode skips only the subscription condition for configured memberships.
+Authentication, roles, tenant ownership, tenant quotas and the global cap still
+apply. Unknown users remain denied. Startup rejects local mode unless `HOST`
+is an explicit loopback IP (`127.0.0.1` or `::1`); it never decides from request
+Host/Origin/forwarded headers or the browser's hostname. Do not expose a local
+gateway through tunnels, reverse proxies or port forwarding. Compose explicitly
+uses hosted mode because the container listens on `0.0.0.0`, even when its
+published host port is loopback-only.
+
+This gates the Cookist application, not the generated public S3/CloudFront
+sites. Previously shared site URLs remain public until resources are deleted.
+No checkout, pricing or verified payment integration is enabled by this setting;
+entitlement grants remain operator-managed until billing is implemented.
+
 Select a commercial AWS Region for the S3 bucket. The list is not filtered by
 account: some regions require opting in before use. CloudFront is global.
 See [AWS Regions](https://docs.aws.amazon.com/general/latest/gr/rande.html)

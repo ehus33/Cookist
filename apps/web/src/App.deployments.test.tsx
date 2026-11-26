@@ -4,7 +4,7 @@ import { App } from './App';
 import * as apiModule from './api';
 
 const session = { token: 'access-token', actorId: 'owner' };
-const ownerAccess = { role: 'platform_owner', subscribed: true, canList: true, canCreate: true, canDelete: true };
+const ownerAccess = { role: 'platform_owner', subscribed: true, paymentRequired: false, canList: true, canCreate: true, canDelete: true };
 
 afterEach(() => {
   cleanup();
@@ -101,10 +101,10 @@ it('shows cleanup errors without removing the deployment and allows retry confir
 
 it('gates unconfigured accounts without requesting deployment data', async () => {
     const api = vi.spyOn(apiModule, 'api').mockResolvedValue({
-      role: 'none', subscribed: false, canList: false, canCreate: false, canDelete: false,
+      role: 'none', subscribed: false, paymentRequired: true, canList: false, canCreate: false, canDelete: false,
     });
     render(<App authenticatedSession={session} />);
-    expect(await screen.findByRole('heading', { name: 'Access required' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Paid access required' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'New deployment' })).toBeDisabled();
     expect(api).not.toHaveBeenCalledWith('/api/deployments', expect.anything(), expect.anything());
   });
@@ -112,17 +112,18 @@ it('gates unconfigured accounts without requesting deployment data', async () =>
 it('allows expired deployers to clean up but not create and keeps viewers read-only', async () => {
     const api = vi.spyOn(apiModule, 'api').mockImplementation(async path => {
       if (path === '/api/deployment-access') return {
-        role: 'deployer', subscribed: false, canList: true, canCreate: false, canDelete: true,
+        role: 'deployer', subscribed: false, paymentRequired: true, canList: true, canCreate: false, canDelete: true,
       };
-      return [{ id: 'site', name: 'Site', region: 'us-west-2', status: 'ready' }];
+      return [{ id: 'site', name: 'Site', region: 'us-west-2', status: 'ready', url: 'https://example.cloudfront.net' }];
     });
     const { rerender } = render(<App authenticatedSession={session} />);
     expect(await screen.findByRole('button', { name: 'Delete Site' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'New deployment' })).toBeDisabled();
     expect(screen.getByText(/Checkout is not available yet/)).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Open site' })).not.toBeInTheDocument();
     api.mockImplementation(async path => {
       if (path === '/api/deployment-access') return {
-        role: 'viewer', subscribed: true, canList: true, canCreate: false, canDelete: false,
+        role: 'viewer', subscribed: true, paymentRequired: false, canList: true, canCreate: false, canDelete: false,
       };
       return [{ id: 'site', name: 'Site', region: 'us-west-2', status: 'ready' }];
     });
@@ -137,7 +138,7 @@ it('ignores an old account deployment response after switching accounts', async 
   vi.spyOn(apiModule, 'api').mockImplementation(async (path, account, options) => {
     if (options?.method === 'POST') return pending;
     if (path === '/api/deployment-access') return account?.actorId === 'owner' ? ownerAccess
-      : { role: 'viewer', subscribed: true, canList: true, canCreate: false, canDelete: false };
+      : { role: 'viewer', subscribed: true, paymentRequired: false, canList: true, canCreate: false, canDelete: false };
     return [];
   });
   const { rerender } = render(<App authenticatedSession={session} />);
@@ -154,4 +155,16 @@ it('ignores an old account deployment response after switching accounts', async 
   });
   expect(screen.queryByText('Private site')).not.toBeInTheDocument();
   expect(screen.queryByText(/Deployment started/)).not.toBeInTheDocument();
+});
+
+it('uses server-authorized local access without a payment notice', async () => {
+  vi.spyOn(apiModule, 'api').mockImplementation(async path => {
+    if (path === '/api/deployment-access') return {
+      role: 'deployer', subscribed: false, paymentRequired: false, canList: true, canCreate: true, canDelete: true,
+    };
+    return [];
+  });
+  render(<App authenticatedSession={session} />);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'New deployment' })).toBeEnabled());
+  expect(screen.queryByRole('heading', { name: 'Paid access required' })).not.toBeInTheDocument();
 });

@@ -5,7 +5,7 @@ import type { Session } from './types';
 
 type DeploymentTemplate = 'blank' | 'business';
 type Deployment = { id: string; name: string; region: string; status: 'running' | 'ready' | 'failed' | 'deleting' | 'cleanup_failed'; url?: string };
-type DeploymentAccess = { role: string; subscribed: boolean; canList: boolean; canCreate: boolean; canDelete: boolean };
+type DeploymentAccess = { role: string; subscribed: boolean; paymentRequired: boolean; canList: boolean; canCreate: boolean; canDelete: boolean };
 
 function isDeploymentAccess(value: unknown): value is DeploymentAccess {
   if (!value || typeof value !== 'object') return false;
@@ -13,7 +13,8 @@ function isDeploymentAccess(value: unknown): value is DeploymentAccess {
   return typeof access.role === 'string'
     && ['platform_owner', 'customer_admin', 'deployer', 'viewer', 'none'].includes(access.role)
     && typeof access.subscribed === 'boolean' && typeof access.canList === 'boolean'
-    && typeof access.canCreate === 'boolean' && typeof access.canDelete === 'boolean';
+    && typeof access.canCreate === 'boolean' && typeof access.canDelete === 'boolean'
+    && typeof access.paymentRequired === 'boolean';
 }
 
 function isDeployment(value: unknown): value is Deployment {
@@ -213,19 +214,22 @@ export function App({ authenticatedSession, onSignOut, authError }: {
       {!authenticatedSession && <p className="deployment-notice">Managed deployments require signing in with an authorized account.</p>}
       {authenticatedSession && !currentAccess && !loadError && <p role="status">Checking deployment access...</p>}
       {currentAccess && !currentAccess.canList && <section aria-label="Access required">
-        <h3>Access required</h3>
+        <h3>{currentAccess.paymentRequired ? 'Paid access required' : 'Access required'}</h3>
         <p>Your account has not been granted access. Paid access is not available yet; contact the operator.</p>
       </section>}
-      {currentAccess?.canList && !currentAccess.subscribed && <p className="deployment-notice">
-        An active subscription is required to create deployments. You can still view existing resources
-        and, if your role permits, delete them to stop further usage charges. Checkout is not available yet.
-      </p>}
+      {currentAccess?.canList && currentAccess.paymentRequired && <section aria-label="Payment required">
+        <h3>Paid access required</h3>
+        <p className="deployment-notice">An active subscription is required to use deployment features.
+          Existing deployment records remain available for recovery and, if your role permits,
+          deletion to stop further usage charges. Checkout is not available yet; contact the operator.</p>
+      </section>}
       {currentAccess?.role === 'viewer' && <p className="deployment-notice">Your role provides read-only deployment access.</p>}
       {loadError && <p role="alert">{loadError}</p>}
       {visibleDeployments.length > 0 && <ul className="deployment-list">
         {visibleDeployments.map(deployment => <li key={deployment.id}>
           <strong>{deployment.name}</strong> <span>{deployment.region} &mdash; {deployment.status}</span>
-          {deployment.url && <a href={deployment.url} target="_blank" rel="noreferrer">Open site</a>}
+          {deployment.url && currentAccess && !currentAccess.paymentRequired &&
+            <a href={deployment.url} target="_blank" rel="noreferrer">Open site</a>}
           {deployment.status === 'failed' && <small>Deployment failed. An operator must inspect the private Terraform log and state.</small>}
           {deployment.status === 'running' && <small>If the server was interrupted, an operator must check the worker and state before trying again.</small>}
           {deployment.status === 'deleting' && <small>Deleting AWS resources. State is retained until cleanup succeeds.</small>}

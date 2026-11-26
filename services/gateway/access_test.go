@@ -230,3 +230,100 @@ func TestCustomerQuotaFailsClosedOnInvalidOwnership(t *testing.T) {
 		t.Fatalf("invalid ownership bypassed quota: %d %s", rec.Code, rec.Body)
 	}
 }
+
+func TestLocalSubscriptionBypassRequiresExplicitLoopbackBinding(t *testing.T) {
+	for _, test := range []struct {
+		mode, host     string
+		local, invalid bool
+	}{
+		{"hosted", "0.0.0.0", false, false},
+		{"hosted", "127.0.0.1", false, false},
+		{"local", "127.0.0.1", true, false},
+		{"local", "::1", true, false},
+		{"local", "0.0.0.0", false, true},
+		{"local", "::", false, true},
+		{"local", "100.93.226.69", false, true},
+		{"local", "localhost", false, true},
+		{"local", "", false, true},
+		{"unknown", "127.0.0.1", false, true},
+	} {
+		local, err := localSubscriptionBypass(test.mode, test.host)
+		if local != test.local || (err != nil) != test.invalid {
+			t.Errorf("%s/%s returned local=%v err=%v", test.mode, test.host, local, err)
+		}
+	}
+}
+
+func TestLocalBypassPreservesRolesOwnershipAndQuota(t *testing.T) {
+	w := policyWorker(t)
+	setPolicy(t, w, time.Now().Add(-time.Minute).UTC().Format(time.RFC3339))
+	w.localAccess = true
+	for _, actor := range []string{"admin", "deployer"} {
+		access, err := w.accessFor(actor)
+		if err != nil || !access.CanCreate || access.PaymentRequired || access.Subscribed {
+			t.Fatalf("local entitlement bypass failed: %+v %v", access, err)
+		}
+		if err := access.check("delete", &deployment{TenantID: "beta"}); err == nil {
+			t.Fatal("local bypass defeated tenant isolation")
+		}
+	}
+	for _, actor := range []string{"viewer", "unregistered"} {
+		access, err := w.accessFor(actor)
+		if err != nil || access.CanCreate {
+			t.Fatalf("local bypass granted an unauthorized role: %+v %v", access, err)
+		}
+	}
+	d := cleanupFixture(t, w, "failed")
+	d.TenantID, d.CreatedBy = "alpha", "deployer"
+	if err := saveDeployment(filepath.Join(w.root, d.ID), d); err != nil {
+		t.Fatal(err)
+	}
+	if rec := requestDeployment(w, "POST", "Bearer admin", `{"name":"New","region":"us-west-2","template":"blank"}`); rec.Code != 429 {
+		t.Fatalf("local bypass defeated tenant quota: %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestHostedPaywallCannotBeBypassedWithLocalHeaders(t *testing.T) {
+	w := policyWorker(t)
+	setPolicy(t, w, time.Now().Add(-time.Minute).UTC().Format(time.RFC3339))
+	w.execute = func(context.Context, string, io.Writer, ...string) ([]byte, error) {
+		t.Error("hosted unpaid request invoked Terraform")
+		return nil, nil
+	}
+	req := httptest.NewRequest("POST", "http://localhost/api/deployments",
+		strings.NewReader(`{"name":"Site","region":"us-west-2","template":"blank"}`))
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("Authorization", "Bearer admin")
+	req.Header.Set("X-Forwarded-Host", "localhost")
+	req.Header.Set("X-Forwarded-For", "127.0.0.1")
+	rec := httptest.NewRecorder()
+	w.ServeHTTP(rec, req)
+	if rec.Code != 403 || !strings.Contains(rec.Body.String(), "subscription_required") {
+		t.Fatalf("local headers bypassed hosted paywall: %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestHostedPaywallConcealsURLsButAllowsRecoveryListing(t *testing.T) {
+	w := policyWorker(t)
+	d := cleanupFixture(t, w, "ready")
+	d.TenantID, d.CreatedBy, d.URL = "alpha", "admin", "https://example.cloudfront.net"
+	if err := saveDeployment(filepath.Join(w.root, d.ID), d); err != nil {
+		t.Fatal(err)
+	}
+	setPolicy(t, w, time.Now().Add(-time.Minute).UTC().Format(time.RFC3339))
+	for actor, wantURL := range map[string]bool{"admin": false, "owner": true} {
+		rec := requestDeployment(w, "GET", "Bearer "+actor, "")
+		var listed []deployment
+		if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &listed) != nil || len(listed) != 1 {
+			t.Fatalf("recovery listing failed: %d %s", rec.Code, rec.Body)
+		}
+		if (listed[0].URL != "") != wantURL || !listed[0].CanDelete {
+			t.Fatalf("incorrect paywall/recovery permission for %s: %+v", actor, listed[0])
+		}
+	}
+	w.localAccess = true
+	rec := requestDeployment(w, "GET", "Bearer admin", "")
+	if !strings.Contains(rec.Body.String(), d.URL) {
+		t.Fatalf("local subscription bypass hid authorized site: %s", rec.Body)
+	}
+}

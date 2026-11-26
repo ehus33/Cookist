@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -30,17 +31,33 @@ type accessPolicy struct {
 }
 
 type deploymentAccess struct {
-	ActorID    string `json:"-"`
-	TenantID   string `json:"tenantId,omitempty"`
-	Role       string `json:"role"`
-	Subscribed bool   `json:"subscribed"`
-	Limit      int    `json:"deploymentLimit"`
-	CanList    bool   `json:"canList"`
-	CanCreate  bool   `json:"canCreate"`
-	CanDelete  bool   `json:"canDelete"`
+	ActorID         string `json:"-"`
+	TenantID        string `json:"tenantId,omitempty"`
+	Role            string `json:"role"`
+	Subscribed      bool   `json:"subscribed"`
+	Limit           int    `json:"deploymentLimit"`
+	CanList         bool   `json:"canList"`
+	CanCreate       bool   `json:"canCreate"`
+	CanDelete       bool   `json:"canDelete"`
+	PaymentRequired bool   `json:"paymentRequired"`
 }
 
 var tenantPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+
+func localSubscriptionBypass(mode, host string) (bool, error) {
+	switch mode {
+	case "hosted":
+		return false, nil
+	case "local":
+		ip := net.ParseIP(host)
+		if ip == nil || !ip.IsLoopback() {
+			return false, errors.New("local access mode requires HOST to be an explicit loopback IP address")
+		}
+		return true, nil
+	default:
+		return false, errors.New("COOKIST_DEPLOYMENT_ACCESS_MODE must be hosted or local")
+	}
+}
 
 func loadAccessPolicy(filename string) (accessPolicy, error) {
 	var policy accessPolicy
@@ -112,7 +129,7 @@ func (w *deploymentWorker) accessFor(actor string) (deploymentAccess, error) {
 	if err != nil {
 		return deploymentAccess{}, err
 	}
-	access := deploymentAccess{ActorID: actor, Role: "none"}
+	access := deploymentAccess{ActorID: actor, Role: "none", PaymentRequired: !w.localAccess}
 	if actor == w.owner {
 		return deploymentAccess{ActorID: actor, TenantID: "owner", Role: "platform_owner",
 			Subscribed: true, Limit: maxTestDeployments, CanList: true, CanCreate: true, CanDelete: true}, nil
@@ -133,7 +150,8 @@ func (w *deploymentWorker) accessFor(actor string) (deploymentAccess, error) {
 	canManage := member.Role == "customer_admin" || member.Role == "deployer"
 	return deploymentAccess{ActorID: actor, TenantID: member.TenantID, Role: member.Role,
 		Subscribed: subscribed, Limit: tenant.DeploymentLimit, CanList: true,
-		CanCreate: canManage && subscribed, CanDelete: canManage}, nil
+		CanCreate: canManage && (subscribed || w.localAccess), CanDelete: canManage,
+		PaymentRequired: !subscribed && !w.localAccess}, nil
 }
 
 func (a deploymentAccess) check(action string, d *deployment) error {

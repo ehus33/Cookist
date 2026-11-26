@@ -211,6 +211,11 @@ func env(key, fallback string) string {
 func main() {
 	coreURL := env("CORE_URL", "http://127.0.0.1:8081")
 	mode := env("COOKIST_AUTH_MODE", "demo")
+	host := env("HOST", "127.0.0.1")
+	localAccess, err := localSubscriptionBypass(env("COOKIST_DEPLOYMENT_ACCESS_MODE", "hosted"), host)
+	if err != nil {
+		log.Fatal(err)
+	}
 	var deployments *deploymentWorker
 	switch env("COOKIST_DEPLOYMENTS_ENABLED", "false") {
 	case "false":
@@ -225,6 +230,7 @@ func main() {
 			log.Fatal(err)
 		}
 		deployments.accessFile = os.Getenv("COOKIST_DEPLOYMENT_ACCESS_FILE")
+		deployments.localAccess = localAccess
 		if _, err := loadAccessPolicy(deployments.accessFile); err != nil {
 			log.Fatalf("deployment access configuration is invalid: %v", err)
 		}
@@ -250,7 +256,7 @@ func main() {
 		log.Fatal("COOKIST_AUTH_MODE must be demo or cognito")
 	}
 	server := &http.Server{
-		Addr: env("HOST", "127.0.0.1") + ":" + env("PORT", "8080"), Handler: handler,
+		Addr: net.JoinHostPort(host, env("PORT", "8080")), Handler: handler,
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
 		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 * 1024,
 	}
