@@ -38,6 +38,26 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px
 .template-choice span { display: grid; gap: 4px; }
 .template-choice small { color: #64675c; }
 .business-fields { display: grid; gap: 16px; }
+.site-style-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.deployment-form .site-style-choice {
+  display: grid; gap: 10px; padding: 12px; border: 2px solid #dfe1da; border-radius: 12px; cursor: pointer; font-weight: 400;
+}
+.site-style-choice.is-selected { border-color: #b83c1e; }
+.site-style-choice:focus-within { outline: 2px solid #b83c1e; outline-offset: 3px; }
+.site-style-choice small { color: #64675c; line-height: 1.4; }
+.site-style-choice-heading { display: flex; align-items: center; gap: 8px; }
+.site-style-choice-heading input { margin: 0; accent-color: #b83c1e; }
+.site-style-swatch.generated-site { display: grid; gap: 12px; min-height: 0; padding: 18px; border-radius: 6px; }
+.swatch-title { color: var(--site-accent); font-size: 1.05rem; font-weight: 700; }
+.swatch-card { display: grid; gap: 7px; padding: 12px; background: var(--site-surface); border: 1px solid var(--site-border); border-radius: var(--site-radius); }
+.swatch-card span { height: 5px; width: 75%; border-radius: 3px; background: var(--site-muted); opacity: .35; }
+.swatch-card span:last-child { width: 45%; }
+.site-preview-block { display: grid; gap: 12px; }
+.site-preview-block > h4 { margin: 0; font-size: 1rem; }
+.site-preview.generated-site { min-height: 0; max-height: 420px; overflow: auto; padding: 28px; border: 1px solid var(--site-border); border-radius: 12px; }
+.site-preview .site-title { font-size: 2rem; }
+.site-preview-note { color: #64675c; font-size: .875rem; line-height: 1.5; }
+.site-style-label { text-transform: capitalize; }
 .deployment-notice { padding: 12px; border-radius: 6px; background: #f7f4e9; color: #504b37; line-height: 1.5; }
 .form-actions { display: flex; gap: 12px; }
 .workspace button.secondary { background: #ebede7; color: #292b23; }
@@ -48,4 +68,6 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px
 @media (max-width: 540px) {
   .workspace, .auth-page { margin: 3vh auto; padding: 20px; }
   .section-heading { flex-direction: column; }
+  .site-style-options { grid-template-columns: 1fr; }
+  .site-preview.generated-site { padding: 20px; }
 }

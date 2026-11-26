@@ -66,6 +66,7 @@ func TestAccessRolesAndSubscriptionConditions(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			for action, want := range map[string]bool{"list": test.list, "create": test.create, "delete": test.delete} {
 				if got := access.check(action, nil) == nil; got != want {
 					t.Errorf("%s allowed=%v, want %v", action, got, want)
@@ -86,6 +87,109 @@ func TestAccessRolesAndSubscriptionConditions(t *testing.T) {
 	owner, err := w.accessFor("owner")
 	if err != nil || !owner.CanCreate {
 		t.Fatal("owner lost subscription bypass", err)
+	}
+}
+
+func TestSelfServiceBillingIsolatedTenantsAndPaidAccess(t *testing.T) {
+	w := policyWorker(t)
+	w.billing = &stripeBilling{root: t.TempDir(), price: "price_self_service"}
+	firstActor := "cognito:" + strings.Repeat("a", 64) + ":first"
+	secondActor := "cognito:" + strings.Repeat("a", 64) + ":second"
+	before, err := w.accessFor(firstActor)
+	if err != nil || before.CanList || before.CanCheckout {
+		t.Fatal("self-service must be opt-in", err)
+	}
+	w.selfServiceBilling = true
+	first, err := w.accessFor(firstActor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := w.accessFor(secondActor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.TenantID == second.TenantID || !tenantPattern.MatchString(first.TenantID) ||
+		first.Role != "customer_admin" || !first.CanCheckout || first.CanCreate || first.Subscribed ||
+		first.Limit != 1 || !first.CanList || !first.CanDelete {
+		t.Fatalf("new customer permissions are unsafe: %+v %+v", first, second)
+	}
+	if rec := requestDeployment(w, "POST", "Bearer "+firstActor,
+		`{"name":"Unpaid","region":"us-west-2","template":"blank"}`); rec.Code != 403 {
+		t.Fatalf("new unpaid customer could deploy: %d", rec.Code)
+	}
+	if err := w.billing.save(first.TenantID, tenantBilling{
+		CustomerID: "cus_first", PriceID: w.billing.price, HasSubscription: true,
+		ValidUntil: time.Now().Add(time.Hour).Unix(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	restored := &deploymentWorker{owner: w.owner, accessFile: w.accessFile, selfServiceBilling: true,
+		billing: &stripeBilling{root: w.billing.root, price: w.billing.price}}
+	paid, err := restored.accessFor(firstActor)
+	if err != nil || !paid.CanCreate || !paid.Subscribed || paid.TenantID != first.TenantID {
+		t.Fatal("paid personal tenant did not survive a fresh worker", err)
+	}
+	unpaid, err := restored.accessFor(secondActor)
+	if err != nil || unpaid.CanCreate || unpaid.Subscribed {
+		t.Fatal("another identity inherited paid access", err)
+	}
+	if unpaid.check("delete", &deployment{TenantID: first.TenantID, CreatedBy: firstActor}) == nil {
+		t.Fatal("personal tenant could clean up another customer's resources")
+	}
+}
+
+func TestSelfServiceBillingPreservesAssignedRolesAndExemptions(t *testing.T) {
+	w := policyWorker(t)
+	w.billing = &stripeBilling{root: t.TempDir(), price: "price_self_service"}
+	w.selfServiceBilling = true
+	viewer, err := w.accessFor("viewer")
+	if err != nil || viewer.Role != "viewer" || viewer.TenantID != "alpha" ||
+		viewer.CanCheckout || viewer.CanCreate || viewer.CanDelete {
+		t.Fatal("assigned viewer was elevated by onboarding", err)
+	}
+	owner, err := w.accessFor("owner")
+	if err != nil || owner.Role != "platform_owner" || !owner.CanCreate || owner.CanCheckout {
+		t.Fatal("owner exemption changed", err)
+	}
+	actor := "cognito:" + strings.Repeat("a", 64) + ":new"
+	w.localAccess = true
+	local, err := w.accessFor(actor)
+	if err != nil || local.CanCheckout || local.CanList {
+		t.Fatal("hosted self-service unexpectedly enrolled a local user", err)
+	}
+	w.localAccess, w.billing = false, nil
+	disabled, err := w.accessFor(actor)
+	if err != nil || disabled.CanCheckout || disabled.CanList {
+		t.Fatal("onboarding was enabled without Stripe billing", err)
+	}
+}
+
+func TestSelfServiceBillingFailsClosedOnTenantConflict(t *testing.T) {
+	w := policyWorker(t)
+	w.billing = &stripeBilling{root: t.TempDir(), price: "price_self_service"}
+	w.selfServiceBilling = true
+	actor := "cognito:" + strings.Repeat("a", 64) + ":new"
+	access, err := w.accessFor(actor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := loadAccessPolicy(w.accessFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.Tenants[access.TenantID] = accessTenant{SubscriptionStatus: "inactive", DeploymentLimit: 1}
+	data, err := json.Marshal(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(w.accessFile, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.accessFor(actor); err == nil {
+		t.Fatal("new identity joined an administrator-managed tenant through a hash conflict")
+	}
+	if _, err := w.accessFor("unverified"); err == nil {
+		t.Fatal("onboarding accepted a non-Cognito identity")
 	}
 }
 

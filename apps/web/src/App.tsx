@@ -2,9 +2,20 @@ import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { api, errorMessage } from './api';
 import type { Session } from './types';
+import '../../../services/gateway/site_styles.css';
 
 type DeploymentTemplate = 'blank' | 'business';
-type Deployment = { id: string; name: string; region: string; status: 'running' | 'ready' | 'failed' | 'deleting' | 'cleanup_failed'; url?: string };
+type SiteStyle = 'classic' | 'modern' | 'warm' | 'bold';
+const siteStyles: { id: SiteStyle; name: string; description: string }[] = [
+  { id: 'classic', name: 'Classic', description: 'Simple, familiar, and distraction-free.' },
+  { id: 'modern', name: 'Modern', description: 'Clean blue accents and rounded cards.' },
+  { id: 'warm', name: 'Warm', description: 'Cream tones and elegant serif typography.' },
+  { id: 'bold', name: 'Bold', description: 'Dark surfaces and vivid purple accents.' },
+];
+function isSiteStyle(value: unknown): value is SiteStyle {
+  return siteStyles.some(style => style.id === value);
+}
+type Deployment = { id: string; name: string; region: string; status: 'running' | 'ready' | 'failed' | 'deleting' | 'cleanup_failed'; url?: string; style?: SiteStyle };
 type DeploymentAccess = { role: string; subscribed: boolean; paymentRequired: boolean; canList: boolean; canCreate: boolean; canDelete: boolean; canCheckout?: boolean; canManageBilling?: boolean };
 
 function isDeploymentAccess(value: unknown): value is DeploymentAccess {
@@ -24,6 +35,7 @@ function isDeployment(value: unknown): value is Deployment {
   const d = value as Record<string, unknown>;
   return typeof d.id === 'string' && typeof d.name === 'string' && typeof d.region === 'string'
     && (d.status === 'running' || d.status === 'ready' || d.status === 'failed' || d.status === 'deleting' || d.status === 'cleanup_failed')
+    && (d.style === undefined || isSiteStyle(d.style))
     && (d.url === undefined || (typeof d.url === 'string' && /^https:\/\/[a-z0-9-]+\.cloudfront\.net$/.test(d.url)));
 }
 
@@ -71,6 +83,7 @@ export function App({ authenticatedSession, onSignOut, authError }: {
   const [name, setName] = useState('');
   const [region, setRegion] = useState('us-west-2');
   const [template, setTemplate] = useState<DeploymentTemplate>('blank');
+  const [siteStyle, setSiteStyle] = useState<SiteStyle>('classic');
   const [businessName, setBusinessName] = useState('');
   const [listTitle, setListTitle] = useState('Services');
   const [items, setItems] = useState('');
@@ -85,6 +98,7 @@ export function App({ authenticatedSession, onSignOut, authError }: {
   const [billingPending, setBillingPending] = useState(false);
   const [billingLink, setBillingLink] = useState<{ url: string; portal: boolean } | null>(null);
   const currentAccess = loadedActor === authenticatedSession?.actorId ? access : null;
+  const previewItems = items.split('\n').map(item => item.trim()).filter(Boolean);
   const visibleDeployments = loadedActor === authenticatedSession?.actorId ? deployments : [];
   const newDeploymentButton = useRef<HTMLButtonElement>(null);
   const requestVersion = useRef(0);
@@ -164,7 +178,7 @@ export function App({ authenticatedSession, onSignOut, authError }: {
     const version = sessionVersion.current;
     try {
       const result = await api<unknown>('/api/deployments', authenticatedSession, {
-        method: 'POST', body: { name, region, template, businessName, listTitle, items },
+        method: 'POST', body: { name, region, template, style: siteStyle, businessName, listTitle, items },
       });
       if (version !== sessionVersion.current) return;
       if (!isDeployment(result)) throw new Error('The server returned an invalid deployment.');
@@ -248,7 +262,7 @@ export function App({ authenticatedSession, onSignOut, authError }: {
       {authenticatedSession && !currentAccess && !loadError && <p role="status">Checking deployment access...</p>}
       {currentAccess && !currentAccess.canList && <section aria-label="Access required">
         <h3>{currentAccess.paymentRequired ? 'Paid access required' : 'Access required'}</h3>
-        <p>Your account has not been granted access. Paid access is not available yet; contact the operator.</p>
+        <p>Your account has not been assigned to an organization. Contact the operator for membership and billing permissions.</p>
       </section>}
       {currentAccess?.canList && currentAccess.paymentRequired && <section aria-label="Payment required">
         <h3>Paid access required</h3>
@@ -272,6 +286,7 @@ export function App({ authenticatedSession, onSignOut, authError }: {
       {visibleDeployments.length > 0 && <ul className="deployment-list">
         {visibleDeployments.map(deployment => <li key={deployment.id}>
           <strong>{deployment.name}</strong> <span>{deployment.region} &mdash; {deployment.status}</span>
+          {deployment.style && <small className="site-style-label">Style: {deployment.style}</small>}
           {deployment.url && currentAccess && !currentAccess.paymentRequired &&
             <a href={deployment.url} target="_blank" rel="noreferrer">Open site</a>}
           {deployment.status === 'failed' && <small>Deployment failed. An operator must inspect the private Terraform log and state.</small>}
@@ -324,6 +339,36 @@ export function App({ authenticatedSession, onSignOut, authError }: {
           <label>List title<input required maxLength={80} value={listTitle} onChange={event => setListTitle(event.target.value)} /></label>
           <label>Items, one per line<textarea maxLength={2000} rows={4} value={items} onChange={event => setItems(event.target.value)} /></label>
         </div>}
+        <fieldset>
+          <legend>Choose a site style</legend>
+          <div className="site-style-options">
+            {siteStyles.map(style => <label key={style.id} className={`site-style-choice${siteStyle === style.id ? ' is-selected' : ''}`}>
+              <span className={`site-style-swatch generated-site site-style-${style.id}`} aria-hidden="true">
+                <span className="swatch-title">Your site</span>
+                <span className="swatch-card"><span /><span /></span>
+              </span>
+              <span className="site-style-choice-heading">
+                <input type="radio" name="siteStyle" checked={siteStyle === style.id} disabled={submitting} onChange={() => setSiteStyle(style.id)} />
+                <strong>{style.name}</strong>
+              </span>
+              <small>{style.description}</small>
+            </label>)}
+          </div>
+        </fieldset>
+        <div className="site-preview-block">
+          <h4>Site preview</h4>
+          <div className={`site-preview generated-site site-style-${siteStyle}`} role="region" aria-label="Site preview">
+            <div className="site-content">
+              <h4 className="site-title">{template === 'business' ? businessName.trim() || 'Your business' : name.trim() || 'Your site'}</h4>
+              <h5 className="site-list-title">{template === 'business' ? listTitle.trim() || 'Your offerings' : 'Your next big idea'}</h5>
+              <ul>{(template === 'business' && previewItems.length ? previewItems : ['Your first offering', 'Something your customers will love']).map((item, index) =>
+                <li key={index}>{item}</li>)}</ul>
+            </div>
+          </div>
+          <p className="site-preview-note">{template === 'blank'
+            ? 'Sample content previews the style only. Your blank site stays empty.'
+            : 'Your business details update this preview. Empty lists show sample items here only.'}</p>
+        </div>
         <p className="deployment-notice">Deploying creates a public static site on AWS S3 and CloudFront in the configured AWS account.
           Anyone with the site URL can access it; it is not Tailscale-private.
           AWS charges may apply until the resources are destroyed. The business template is a static list, not ordering or payments.</p>

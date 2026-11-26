@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { App } from './App';
 import * as apiModule from './api';
@@ -9,6 +9,18 @@ const ownerAccess = { role: 'platform_owner', subscribed: true, paymentRequired:
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+});
+
+it('explains missing membership without claiming Stripe checkout is unavailable', async () => {
+  vi.spyOn(apiModule, 'api').mockResolvedValue({
+    role: 'none', subscribed: false, paymentRequired: true,
+    canList: false, canCreate: false, canDelete: false, canCheckout: false,
+  });
+  render(<App authenticatedSession={session} />);
+  expect(await screen.findByText(/has not been assigned to an organization/)).toBeInTheDocument();
+  expect(screen.queryByText(/Paid access is not available yet/)).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Subscribe with Stripe' })).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'New deployment' })).toBeDisabled();
 });
 
 it('opens only server-owned Stripe checkout and does not unlock on return', async () => {
@@ -72,26 +84,53 @@ it('ignores late checkout results after switching accounts', async () => {
 it('submits the selected business site and displays its deployment status', async () => {
   const api = vi.spyOn(apiModule, 'api').mockImplementation(async (_path, _session, options) => {
     if (_path === '/api/deployment-access') return ownerAccess;
-    if (options?.method === 'POST') return { id: 'one', name: 'Shop', region: 'eu-west-1', status: 'running' };
+    if (options?.method === 'POST') return { id: 'one', name: 'Shop', region: 'eu-west-1', status: 'running', style: 'warm' };
     return [];
   });
   render(<App authenticatedSession={session} />);
   await waitFor(() => expect(screen.getByRole('button', { name: 'New deployment' })).toBeEnabled());
   fireEvent.click(screen.getByRole('button', { name: 'New deployment' }));
   expect(screen.getByRole('radio', { name: /Blank slate/ })).toBeChecked();
+  expect(screen.getByRole('radio', { name: /Classic/ })).toBeChecked();
   expect(screen.getByRole('combobox', { name: 'AWS region' })).toHaveValue('us-west-2');
   fireEvent.change(screen.getByLabelText('Deployment name'), { target: { value: 'Shop' } });
   fireEvent.change(screen.getByLabelText('AWS region'), { target: { value: 'eu-west-1' } });
   fireEvent.click(screen.getByRole('radio', { name: /Business listing/ }));
   fireEvent.change(screen.getByLabelText('Business name'), { target: { value: 'My garage' } });
   fireEvent.change(screen.getByLabelText('Items, one per line'), { target: { value: 'Tire change' } });
+  fireEvent.click(screen.getByRole('radio', { name: /Warm/ }));
+  const preview = screen.getByRole('region', { name: 'Site preview' });
+  expect(preview).toHaveClass('site-style-warm');
+  expect(within(preview).getByText('My garage')).toBeInTheDocument();
+  expect(within(preview).getByText('Tire change')).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Deploy site' }));
   await waitFor(() => expect(api).toHaveBeenCalledWith('/api/deployments', session, expect.objectContaining({
     method: 'POST',
-    body: expect.objectContaining({ name: 'Shop', region: 'eu-west-1', template: 'business', businessName: 'My garage', items: 'Tire change' }),
+    body: expect.objectContaining({ name: 'Shop', region: 'eu-west-1', template: 'business', style: 'warm', businessName: 'My garage', items: 'Tire change' }),
   })));
   expect(await screen.findByText('eu-west-1 — running')).toBeInTheDocument();
+  expect(screen.getByText('Style: warm')).toBeInTheDocument();
   expect(screen.getByRole('status')).toHaveTextContent('Deployment started');
+});
+
+it('previews every style without switching templates or interpreting business text as HTML', () => {
+  render(<App />);
+  fireEvent.click(screen.getByRole('button', { name: 'New deployment' }));
+  expect(screen.getByText(/Your blank site stays empty/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('radio', { name: /Business listing/ }));
+  fireEvent.change(screen.getByLabelText('Business name'), { target: { value: '<script>example</script>' } });
+  fireEvent.change(screen.getByLabelText('Items, one per line'), { target: { value: '  Oil & filter  \n\n<img src=x onerror=alert(1)>' } });
+  const preview = screen.getByRole('region', { name: 'Site preview' });
+  for (const [name, id] of [['Modern', 'modern'], ['Warm', 'warm'], ['Bold', 'bold'], ['Classic', 'classic']]) {
+    fireEvent.click(screen.getByRole('radio', { name: new RegExp(name) }));
+    expect(preview).toHaveClass(`site-style-${id}`);
+    expect(screen.getByRole('radio', { name: /Business listing/ })).toBeChecked();
+    expect(within(preview).getByText('<script>example</script>')).toBeInTheDocument();
+    expect(within(preview).getAllByRole('listitem')).toHaveLength(2);
+    expect(within(preview).getByText('Oil & filter')).toBeInTheDocument();
+    expect(preview.querySelector('script, img')).toBeNull();
+  }
+  expect(screen.getByRole('button', { name: 'Deploy site' })).toBeDisabled();
 });
 
 it('does not allow unauthenticated deployment', () => {
