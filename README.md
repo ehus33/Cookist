@@ -52,6 +52,18 @@ payments, a database, or an editor for deployed sites. AWS charges continue
 until the resources are destroyed; see [S3 pricing](https://aws.amazon.com/s3/pricing/)
 and [CloudFront pricing](https://aws.amazon.com/cloudfront/pricing/).
 
+Choose a content template and then a visual style: **Classic** (the existing
+simple look), **Modern** (blue accents and rounded cards), **Warm** (cream tones
+and serif typography), or **Bold** (dark surfaces and purple accents). The
+creation form previews each style and updates as you enter business details.
+Preview placeholders are not deployed; blank templates remain empty.
+
+The selected style is saved with the deployment and embedded in its generated
+HTML, with no external fonts or styling service required. Styles apply to new
+sites only; existing sites are unchanged. API clients may send `style` as
+`classic`, `modern`, `warm`, or `bold`; omitting it preserves Classic.
+Unsupported styles are rejected before provisioning.
+
 During the test phase, the worker permits **at most four site deployments total
 across all users**, not four per user or four individual AWS resources. Each
 site creates multiple AWS resources. The server checks the cap while holding
@@ -196,9 +208,17 @@ by installing this code.
    secret into private runtime configuration. Raw-body signatures, timestamp,
    mode, API version and customer mapping are verified; connected-account events
    are not supported. Do not disable these checks.
-5. Provision verified Cognito actors as `customer_admin`, `deployer` or `viewer`
-   in the access policy, including their tenant quota. Self-registration does
-   not create a tenant or grant checkout rights. Customer admins select
+5. Choose customer onboarding. The default `COOKIST_SELF_SERVICE_BILLING=false`
+   requires provisioning verified Cognito actors as `customer_admin`, `deployer`
+   or `viewer` in the access policy, including their tenant quota. To allow
+   self-service signup, explicitly set `COOKIST_SELF_SERVICE_BILLING=true` with
+   configured hosted Stripe billing. Verified actors without assigned membership
+   receive an isolated, server-derived personal tenant with a one-deployment
+   limit and billing-admin rights only for that tenant. They are not platform
+   administrators, and they cannot deploy without payment. Existing policy
+   memberships take precedence, including viewer restrictions. Tenant IDs are
+   stable across restarts; conflicts with policy-managed tenant IDs fail closed.
+   Self-service is not available in local bypass mode. Customer admins select
    **Subscribe with Stripe**, then follow the secure Checkout link. Only a paid
    invoice on an active subscription with the configured price and quantity one
    unlocks that tenant until its paid period ends. No trial/grace access is
@@ -263,12 +283,35 @@ preserved. Funnel is beta and subject to bandwidth limits; monitor Stripe's
 delivery retries. Nginx and Tailscale are enabled services, and the Funnel
 configuration is persistent.
 
-**Only the ingress is live.** The gateway still runs the earlier cleanup release,
-not the Stripe billing build, so forwarded webhook POSTs currently return 401.
-Finish creating the sandbox destination, configure its signing secret plus the
-matching Stripe key and recurring price, and deploy the billing build before
-expecting payment events to grant access. Do not treat a working HTTPS address
-as a working subscription payment flow.
+The existing worker now runs `cookist-gateway:selfserve-83fbde81bf4e`, a validated
+self-service onboarding patch on merged commit
+`a314b10120143b130ee3cb81ece6956325899449` (web 1.5.0). Billing uses the Glaucous Zipline
+**test sandbox**, not live payments. Its enabled snapshot destination listens
+to the eight events above, and its default sandbox Customer Portal is configured.
+Unsigned webhook POSTs return 400; accepted signed billing events return 204.
+Sandbox Checkout, webhook-confirmed access, portal access and cancellation
+revocation have been exercised against the hosted application.
+
+Test credentials are stored as SSM SecureString parameters under
+`/cookist/billing/test/`; the existing worker role can read only the two required
+parameters. Private runtime configuration and a read-only access-policy mount
+keep credentials and tenant membership out of the image and browser. The
+existing deployment-state volume, private networking and owner exemption remain
+unchanged. `COOKIST_SELF_SERVICE_BILLING=true` is enabled on this worker. Fresh
+verified accounts can subscribe in their own isolated tenants without a manual
+policy entry; this does not grant platform administration or unpaid deployments.
+The flow was verified with a fresh account while the policy had no memberships.
+Other installations remain administrator-approved unless they explicitly enable
+the setting described above.
+
+The previous billing gateway is retained as
+`cookist-gateway-before-selfserve-83fbde81bf4e`, with environment and startup
+backups ending in `.before-selfserve-83fbde81bf4e`. The older cleanup rollback
+`cookist-gateway-before-billing-a314b10` and its backups are also retained.
+Before an operator rolls
+back, stop or finish all active deployment/billing work; restore both backups
+and the previous container without deleting the shared deployment-state volume.
+This rollout is manual: later merges do not update the running image.
 
 To disable only this public entrance on the Lightsail proxy:
 

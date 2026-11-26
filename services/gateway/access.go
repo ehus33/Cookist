@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -137,10 +139,24 @@ func (w *deploymentWorker) accessFor(actor string) (deploymentAccess, error) {
 			Subscribed: true, Limit: maxTestDeployments, CanList: true, CanCreate: true, CanDelete: true}, nil
 	}
 	member, ok := policy.Members[actor]
+	var tenant accessTenant
 	if !ok {
-		return access, nil
+		if !w.selfServiceBilling || w.billing == nil || w.localAccess {
+			return access, nil
+		}
+		if !strings.HasPrefix(actor, "cognito:") {
+			return deploymentAccess{}, errors.New("self-service billing requires a verified Cognito actor")
+		}
+		digest := sha256.Sum256([]byte(actor))
+		id := fmt.Sprintf("self-%x", digest[:28])
+		if _, exists := policy.Tenants[id]; exists {
+			return deploymentAccess{}, errors.New("self-service tenant conflicts with administrator-managed access")
+		}
+		member = accessMembership{TenantID: id, Role: "customer_admin"}
+		tenant = accessTenant{SubscriptionStatus: "inactive", DeploymentLimit: 1}
+	} else {
+		tenant = policy.Tenants[member.TenantID]
 	}
-	tenant := policy.Tenants[member.TenantID]
 	subscribed := false
 	if tenant.SubscriptionStatus == "active" {
 		expires, err := time.Parse(time.RFC3339, tenant.ValidUntil)

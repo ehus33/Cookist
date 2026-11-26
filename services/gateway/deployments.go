@@ -25,6 +25,7 @@ type deploymentRequest struct {
 	Name         string `json:"name"`
 	Region       string `json:"region"`
 	Template     string `json:"template"`
+	Style        string `json:"style"`
 	BusinessName string `json:"businessName"`
 	ListTitle    string `json:"listTitle"`
 	Items        string `json:"items"`
@@ -34,6 +35,7 @@ type deployment struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	Region    string `json:"region"`
+	Style     string `json:"style,omitempty"`
 	Status    string `json:"status"`
 	URL       string `json:"url,omitempty"`
 	CreatedAt string `json:"createdAt"`
@@ -48,6 +50,7 @@ type deploymentWorker struct {
 	coreURL, owner, root, terraform, account string
 	accessFile                               string
 	localAccess                              bool
+	selfServiceBilling                       bool
 	billing                                  *stripeBilling
 	client                                   *http.Client
 	mu                                       sync.Mutex
@@ -61,6 +64,9 @@ var websiteURLPattern = regexp.MustCompile(`^https://[a-z0-9-]+\.cloudfront\.net
 
 //go:embed terraform/site/*.tf terraform/site/.terraform.lock.hcl
 var siteTerraform embed.FS
+
+//go:embed site_styles.css
+var siteStylesCSS string
 
 func newDeploymentWorker(coreURL, owner, root, terraform, account string) (*deploymentWorker, error) {
 	if owner == "" || root == "" || terraform == "" || !accountPattern.MatchString(account) {
@@ -197,6 +203,11 @@ func (w *deploymentWorker) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 }
 
 func validateDeployment(req deploymentRequest) error {
+	switch req.Style {
+	case "", "classic", "modern", "warm", "bold":
+	default:
+		return errors.New("Select a supported site style.")
+	}
 	if strings.TrimSpace(req.Name) == "" || len(req.Name) > 320 || !regionPattern.MatchString(req.Region) ||
 		(req.Template != "blank" && req.Template != "business") || len(req.BusinessName) > 320 ||
 		len(req.ListTitle) > 320 || len(req.Items) > 8000 ||
@@ -297,7 +308,7 @@ func (w *deploymentWorker) create(rw http.ResponseWriter, r *http.Request, acces
 		return
 	}
 	d := deployment{ID: hex.EncodeToString(id[:]), Name: strings.TrimSpace(request.Name),
-		Region: request.Region, Status: "running", CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		Region: request.Region, Style: request.Style, Status: "running", CreatedAt: time.Now().UTC().Format(time.RFC3339),
 		TenantID: access.TenantID, CreatedBy: access.ActorID}
 	dir := filepath.Join(w.root, d.ID)
 	staging := filepath.Join(w.root, "."+d.ID+".pending")
@@ -724,8 +735,14 @@ func terraformVariables(req deploymentRequest, account, id string) ([]byte, erro
 		}
 		content = "<main><h1>" + title + "</h1><h2>" + escape(req.ListTitle) + "</h2><ul>" + items.String() + "</ul></main>"
 	}
+	css := `body{font-family:system-ui,sans-serif;max-width:48rem;margin:4rem auto;padding:0 1.5rem;color:#262a28}li{margin:.75rem 0}`
+	body := "<body>"
+	if req.Style != "" && req.Style != "classic" {
+		css = siteStylesCSS
+		body = `<body class="generated-site site-style-` + req.Style + `">`
+	}
 	page := `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>` + title +
-		`</title><style>body{font-family:system-ui,sans-serif;max-width:48rem;margin:4rem auto;padding:0 1.5rem;color:#262a28}li{margin:.75rem 0}</style></head><body>` + content + `</body></html>`
+		`</title><style>` + css + `</style></head>` + body + content + `</body></html>`
 	return json.MarshalIndent(map[string]string{
 		"account_id": account, "deployment_id": id, "region": req.Region, "page_html": page,
 	}, "", "  ")

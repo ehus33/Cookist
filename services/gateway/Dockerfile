@@ -13,6 +13,7 @@ COPY package.json yarn.lock ./
 COPY apps/web/package.json apps/web/package.json
 RUN yarn install --frozen-lockfile --non-interactive
 COPY apps/web apps/web
+COPY services/gateway/site_styles.css services/gateway/site_styles.css
 RUN yarn build
 FROM alpine:3.21
 WORKDIR /app

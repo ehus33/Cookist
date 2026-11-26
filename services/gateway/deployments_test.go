@@ -367,7 +367,7 @@ func TestDeploymentPersistsStateAndSerializesJobs(t *testing.T) {
 		}
 		return nil, nil
 	}
-	body := `{"name":"Shop","region":"eu-west-1","template":"business","businessName":"Garage","listTitle":"Services","items":"Tire"}`
+	body := `{"name":"Shop","region":"eu-west-1","template":"business","style":"warm","businessName":"Garage","listTitle":"Services","items":"Tire"}`
 	first := requestDeployment(w, "POST", "Bearer owner", body)
 	if first.Code != 202 {
 		t.Fatalf("create returned %d: %s", first.Code, first.Body)
@@ -378,7 +378,7 @@ func TestDeploymentPersistsStateAndSerializesJobs(t *testing.T) {
 	}
 	close(release)
 	d := waitDeployment(t, w, "ready")
-	if d.URL != "https://example.cloudfront.net" || d.Region != "eu-west-1" {
+	if d.URL != "https://example.cloudfront.net" || d.Region != "eu-west-1" || d.Style != "warm" {
 		t.Fatalf("unexpected deployment: %+v", d)
 	}
 	data, err := os.ReadFile(filepath.Join(w.root, d.ID, "terraform.tfvars.json"))
@@ -391,6 +391,9 @@ func TestDeploymentPersistsStateAndSerializesJobs(t *testing.T) {
 	}
 	if variables["account_id"] != w.account || variables["deployment_id"] != d.ID || variables["region"] != d.Region {
 		t.Fatalf("unexpected Terraform variables: %+v", variables)
+	}
+	if !strings.Contains(variables["page_html"], `<body class="generated-site site-style-warm">`) {
+		t.Fatal("selected style was not written to the generated site")
 	}
 	files, err := siteTerraform.ReadDir("terraform/site")
 	if err != nil {
@@ -410,7 +413,7 @@ func TestDeploymentPersistsStateAndSerializesJobs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := waitDeployment(t, restarted, "ready"); got.ID != d.ID {
+	if got := waitDeployment(t, restarted, "ready"); got.ID != d.ID || got.Style != "warm" {
 		t.Fatalf("deployment was not persisted: %+v", got)
 	}
 	if state, err := os.ReadFile(filepath.Join(restarted.root, d.ID, "terraform.tfstate")); err != nil || string(state) != "state" {
@@ -619,42 +622,102 @@ func TestDeploymentLimitSerializesFourthSlotAcrossWorkers(t *testing.T) {
 }
 
 func TestTerraformVariablesEscapeHTMLAndPreserveLiteralText(t *testing.T) {
-	config, err := terraformVariables(deploymentRequest{Name: "Site", Region: "us-west-2", Template: "business",
-		BusinessName: `<garage> ${file("secret")}`, ListTitle: "<Services>", Items: "Oil & filter\n\n%{ if true }\n$${literal}"}, "123456789012", strings.Repeat("a", 32))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var parsed struct {
-		Page string `json:"page_html"`
-	}
-	if err := json.Unmarshal(config, &parsed); err != nil {
-		t.Fatal(err)
-	}
-	page := parsed.Page
-	for _, want := range []string{"&lt;garage&gt;", `${file(&#34;secret&#34;)}`, "<h2>&lt;Services&gt;</h2>", "Oil &amp; filter", "%{ if true }", "$${literal}"} {
-		if !strings.Contains(page, want) {
-			t.Errorf("page does not contain %q: %s", want, page)
-		}
-	}
-	if strings.Contains(page, "<li></li>") || strings.Contains(page, "<garage>") {
-		t.Fatalf("unexpected unescaped or empty item: %s", page)
+	for _, style := range []string{"", "classic", "modern", "warm", "bold"} {
+		t.Run("style_"+style, func(t *testing.T) {
+			config, err := terraformVariables(deploymentRequest{Name: "Site", Region: "us-west-2", Template: "business", Style: style,
+				BusinessName: `<garage> ${file("secret")}`, ListTitle: "<Services>", Items: "Oil & filter\n\n%{ if true }\n$${literal}"}, "123456789012", strings.Repeat("a", 32))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var parsed struct {
+				Page string `json:"page_html"`
+			}
+			if err := json.Unmarshal(config, &parsed); err != nil {
+				t.Fatal(err)
+			}
+			page := parsed.Page
+			for _, want := range []string{"&lt;garage&gt;", `${file(&#34;secret&#34;)}`, "<h2>&lt;Services&gt;</h2>", "Oil &amp; filter", "%{ if true }", "$${literal}"} {
+				if !strings.Contains(page, want) {
+					t.Errorf("page does not contain %q: %s", want, page)
+				}
+			}
+			if strings.Contains(page, "<li></li>") || strings.Contains(page, "<garage>") {
+				t.Fatalf("unexpected unescaped or empty item: %s", page)
+			}
+		})
 	}
 }
 
 func TestTerraformBlankTemplate(t *testing.T) {
-	config, err := terraformVariables(deploymentRequest{Name: "<Site>", Region: "us-west-2", Template: "blank",
-		BusinessName: "Ignored", ListTitle: "Ignored", Items: "Ignored"}, "123456789012", strings.Repeat("b", 32))
+	for _, style := range []string{"", "classic", "modern", "warm", "bold"} {
+		t.Run("style_"+style, func(t *testing.T) {
+			config, err := terraformVariables(deploymentRequest{Name: "<Site>", Region: "us-west-2", Template: "blank", Style: style,
+				BusinessName: "Ignored", ListTitle: "Ignored", Items: "Ignored"}, "123456789012", strings.Repeat("b", 32))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var parsed struct {
+				Page string `json:"page_html"`
+			}
+			if err := json.Unmarshal(config, &parsed); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(parsed.Page, "<title>&lt;Site&gt;</title>") || !strings.Contains(parsed.Page, "<main></main>") || strings.Contains(parsed.Page, "Ignored") {
+				t.Fatalf("unexpected blank page: %s", parsed.Page)
+			}
+		})
+	}
+}
+
+func TestTerraformSiteStyles(t *testing.T) {
+	req := deploymentRequest{Name: "Site", Region: "us-west-2", Template: "business", BusinessName: "Garage", ListTitle: "Services", Items: "Tire"}
+	legacy, err := terraformVariables(req, "123456789012", strings.Repeat("a", 32))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var parsed struct {
-		Page string `json:"page_html"`
+	for _, style := range []string{"classic", "modern", "warm", "bold"} {
+		t.Run(style, func(t *testing.T) {
+			req.Style = style
+			config, err := terraformVariables(req, "123456789012", strings.Repeat("a", 32))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var parsed struct {
+				Page string `json:"page_html"`
+			}
+			if err := json.Unmarshal(config, &parsed); err != nil {
+				t.Fatal(err)
+			}
+			if style == "classic" {
+				if string(config) != string(legacy) || !strings.Contains(parsed.Page, `body{font-family:system-ui,sans-serif;max-width:48rem;margin:4rem auto;padding:0 1.5rem;color:#262a28}li{margin:.75rem 0}`) {
+					t.Fatal("Classic changed the legacy page appearance")
+				}
+			} else if !strings.Contains(parsed.Page, `<body class="generated-site site-style-`+style+`">`) ||
+				!strings.Contains(parsed.Page, ".site-style-"+style+" {") {
+				t.Fatal("generated page does not select an embedded style")
+			}
+		})
 	}
-	if err := json.Unmarshal(config, &parsed); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(parsed.Page, "<title>&lt;Site&gt;</title>") || !strings.Contains(parsed.Page, "<main></main>") || strings.Contains(parsed.Page, "Ignored") {
-		t.Fatalf("unexpected blank page: %s", parsed.Page)
+}
+
+func TestDeploymentRejectsUnknownStylesBeforeProvisioning(t *testing.T) {
+	for _, style := range []string{"neon", "Modern", "modern ", `"></style><script>alert(1)</script>`} {
+		t.Run(style, func(t *testing.T) {
+			w, _ := testWorker(t)
+			req := deploymentRequest{Name: "Site", Region: "us-west-2", Template: "blank", Style: style}
+			body, err := json.Marshal(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rec := requestDeployment(w, http.MethodPost, "Bearer owner", string(body))
+			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "supported site style") {
+				t.Fatalf("invalid style returned %d: %s", rec.Code, rec.Body)
+			}
+			entries, err := os.ReadDir(w.root)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("invalid style created deployment files: %v", err)
+			}
+		})
 	}
 }
 

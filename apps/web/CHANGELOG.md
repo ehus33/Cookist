@@ -1,5 +1,17 @@
 # @cookist/web
 
+## 1.6.0
+
+### Minor Changes
+
+- Add Classic, Modern, Warm, and Bold visual styles with selectable cards and a live business-content preview. Save the selected style with each new deployment and render it into the generated site. Preserve existing sites and empty blank templates.
+
+## 1.5.1
+
+### Patch Changes
+
+- Add opt-in hosted Stripe onboarding for verified customers without an assigned organization. Give each customer an isolated server-owned billing tenant, keep deployments locked until confirmed payment, and preserve administrator-assigned roles and owner/local exemptions. Correct the membership-required message.
+
 ## 1.5.0
 
 ### Minor Changes

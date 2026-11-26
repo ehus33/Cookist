@@ -270,6 +270,16 @@ func main() {
 	default:
 		log.Fatal("COOKIST_BILLING_ENABLED must be true or false")
 	}
+	switch env("COOKIST_SELF_SERVICE_BILLING", "false") {
+	case "false":
+	case "true":
+		if deployments == nil || deployments.billing == nil || localAccess {
+			log.Fatal("self-service billing requires configured hosted Stripe billing")
+		}
+		deployments.selfServiceBilling = true
+	default:
+		log.Fatal("COOKIST_SELF_SERVICE_BILLING must be true or false")
+	}
 	handler, err := newGateway(
 		coreURL, env("WEB_DIST", "apps/web/dist"),
 		strings.Split(env("ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080"), ","),
