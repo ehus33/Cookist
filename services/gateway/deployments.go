@@ -138,6 +138,18 @@ func (w *deploymentWorker) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if strings.HasPrefix(r.URL.Path, "/api/deployments/") {
+		id := strings.TrimPrefix(r.URL.Path, "/api/deployments/")
+		if !idPattern.MatchString(id) {
+			jsonError(rw, 404, "not_found", "Deployment not found.")
+		} else if r.Method != http.MethodDelete {
+			rw.Header().Set("Allow", "DELETE")
+			jsonError(rw, 405, "method_not_allowed", "Use DELETE.")
+		} else {
+			w.delete(rw, id)
+		}
+		return
+	}
 	if r.URL.Path != "/api/deployments" {
 		jsonError(rw, 404, "not_found", "Route not found.")
 		return
@@ -181,6 +193,16 @@ func (w *deploymentWorker) create(rw http.ResponseWriter, r *http.Request) {
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if err := w.acquireOperation(); err != nil {
+		w.operationError(rw, err)
+		return
+	}
+	started := false
+	defer func() {
+		if !started {
+			w.releaseOperation()
+		}
+	}()
 	lock := filepath.Join(w.root, ".worker.lock")
 	f, err := os.OpenFile(lock, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if errors.Is(err, os.ErrExist) {
@@ -233,6 +255,9 @@ func (w *deploymentWorker) create(rw http.ResponseWriter, r *http.Request) {
 			err = saveDeployment(staging, d)
 		}
 		if err == nil {
+			err = os.WriteFile(filepath.Join(staging, ".never-applied"), nil, 0600)
+		}
+		if err == nil {
 			err = os.Rename(staging, dir)
 		}
 	}
@@ -241,11 +266,42 @@ func (w *deploymentWorker) create(rw http.ResponseWriter, r *http.Request) {
 		jsonError(rw, 500, "storage_error", "Unable to save the deployment; operator recovery is required.")
 		return
 	}
+	if err = os.WriteFile(lock, []byte(d.ID), 0600); err != nil {
+		log.Printf("deployment lock owner could not be saved: %v", err)
+		jsonError(rw, 500, "storage_error", "Unable to start the deployment; operator recovery is required.")
+		return
+	}
+	started = true
 	go w.run(dir, d)
 	rw.Header().Set("Content-Type", "application/json")
 	rw.Header().Set("Cache-Control", "no-store")
 	rw.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(rw).Encode(d)
+}
+
+// This separate lock serializes cleanup with creation, including recovery of a
+// completed failed apply whose worker lock is intentionally still present.
+func (w *deploymentWorker) acquireOperation() error {
+	f, err := os.OpenFile(filepath.Join(w.root, ".operation.lock"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	return f.Close()
+}
+
+func (w *deploymentWorker) releaseOperation() {
+	if err := os.Remove(filepath.Join(w.root, ".operation.lock")); err != nil {
+		log.Printf("deployment operation lock removal failed: %v", err)
+	}
+}
+
+func (w *deploymentWorker) operationError(rw http.ResponseWriter, err error) {
+	if errors.Is(err, os.ErrExist) {
+		jsonError(rw, 409, "worker_busy", "A deployment operation is running or needs operator recovery.")
+		return
+	}
+	log.Printf("deployment operation lock failed: %v", err)
+	jsonError(rw, 500, "storage_error", "Deployment storage is unavailable; operator recovery is required.")
 }
 
 func (w *deploymentWorker) removeLock() {
@@ -271,12 +327,18 @@ func saveDeployment(dir string, d deployment) error {
 }
 
 func (w *deploymentWorker) run(dir string, d deployment) {
+	defer w.releaseOperation()
 	logFile, err := os.OpenFile(filepath.Join(dir, "terraform.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err == nil {
 		defer logFile.Close()
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 		defer cancel()
 		for _, args := range [][]string{{"init", "-input=false", "-no-color"}, {"apply", "-input=false", "-auto-approve", "-no-color"}} {
+			if args[0] == "apply" {
+				if err = os.Remove(filepath.Join(dir, ".never-applied")); err != nil {
+					break
+				}
+			}
 			if _, err = w.execute(ctx, dir, logFile, args...); err != nil {
 				break
 			}
@@ -299,6 +361,8 @@ func (w *deploymentWorker) run(dir string, d deployment) {
 	} else {
 		d.Status = "ready"
 	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if err = saveDeployment(dir, d); err != nil {
 		log.Printf("deployment %s status could not be saved: %v; lock retained", d.ID, err)
 		return
@@ -308,7 +372,219 @@ func (w *deploymentWorker) run(dir string, d deployment) {
 	}
 }
 
+func readDeployment(dir, id string) (deployment, error) {
+	var d deployment
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return d, err
+	}
+	if !info.IsDir() {
+		return d, errors.New("deployment directory is invalid")
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "result.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		data, err = os.ReadFile(filepath.Join(dir, "deployment.json"))
+	}
+	if err != nil {
+		return d, err
+	}
+	if err := json.Unmarshal(data, &d); err != nil {
+		return d, err
+	}
+	if d.ID != id || (d.Status != "running" && d.Status != "ready" && d.Status != "failed" &&
+		d.Status != "deleting" && d.Status != "cleanup_failed") {
+		return d, errors.New("deployment metadata is invalid")
+	}
+	return d, nil
+}
+
+func (w *deploymentWorker) delete(rw http.ResponseWriter, id string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if err := w.acquireOperation(); err != nil {
+		w.operationError(rw, err)
+		return
+	}
+	started := false
+	defer func() {
+		if !started {
+			w.releaseOperation()
+		}
+	}()
+	dir := filepath.Join(w.root, id)
+	d, err := readDeployment(dir, id)
+	if errors.Is(err, os.ErrNotExist) {
+		jsonError(rw, 404, "not_found", "Deployment not found.")
+		return
+	}
+	if err != nil {
+		log.Printf("deployment cleanup metadata failed: %v", err)
+		jsonError(rw, 500, "storage_error", "Unable to read deployment state; operator recovery is required.")
+		return
+	}
+	if d.Status != "ready" && d.Status != "failed" && d.Status != "cleanup_failed" {
+		jsonError(rw, 409, "worker_busy", "Only completed deployments can be deleted. Interrupted jobs require operator recovery.")
+		return
+	}
+	lock := filepath.Join(w.root, ".worker.lock")
+	owner, err := os.ReadFile(lock)
+	if err == nil {
+		if !w.canRecoverLock(id, string(owner)) {
+			jsonError(rw, 409, "worker_busy", "Another deployment is running or needs operator recovery.")
+			return
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		log.Printf("deployment cleanup lock read failed: %v", err)
+		jsonError(rw, 500, "storage_error", "Unable to read the worker lock.")
+		return
+	} else {
+		if !w.canRecoverLock(id, id) {
+			jsonError(rw, 409, "worker_busy", "Another deployment is running or needs operator recovery.")
+			return
+		}
+		f, err := os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err != nil {
+			w.operationError(rw, err)
+			return
+		}
+		_, writeErr := f.WriteString(id)
+		closeErr := f.Close()
+		if writeErr != nil || closeErr != nil {
+			log.Printf("deployment cleanup lock write failed: %v, %v", writeErr, closeErr)
+			jsonError(rw, 500, "storage_error", "Unable to save the worker lock; operator recovery is required.")
+			return
+		}
+	}
+	d.Status = "deleting"
+	d.URL = ""
+	if err = saveDeployment(dir, d); err != nil {
+		log.Printf("deployment cleanup status failed: %v", err)
+		jsonError(rw, 500, "storage_error", "Unable to save cleanup status; operator recovery is required.")
+		return
+	}
+	started = true
+	go w.destroy(dir, d)
+	rw.Header().Set("Content-Type", "application/json")
+	rw.Header().Set("Cache-Control", "no-store")
+	rw.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(rw).Encode(d)
+}
+
+func (w *deploymentWorker) canRecoverLock(id, owner string) bool {
+	if owner != "" && owner != id {
+		return false
+	}
+	entries, err := os.ReadDir(w.root)
+	if err != nil {
+		log.Printf("deployment recovery scan failed: %v", err)
+		return false
+	}
+	failed := 0
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".pending") {
+			return false
+		}
+		if !idPattern.MatchString(entry.Name()) {
+			continue
+		}
+		d, err := readDeployment(filepath.Join(w.root, entry.Name()), entry.Name())
+		if err != nil || d.Status == "running" || d.Status == "deleting" {
+			return false
+		}
+		if d.Status == "failed" || d.Status == "cleanup_failed" {
+			failed++
+			if owner == "" && d.ID != id {
+				return false
+			}
+		}
+	}
+	// Older workers wrote empty locks; recover only the sole failed job.
+	return owner == id || failed == 1
+}
+
+func readTerraformState(dir string) (bool, error) {
+	data, err := os.ReadFile(filepath.Join(dir, "terraform.tfstate"))
+	if err != nil {
+		return false, err
+	}
+	var state struct {
+		Version   int `json:"version"`
+		Resources []struct {
+			Mode string `json:"mode"`
+		} `json:"resources"`
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		return false, err
+	}
+	if state.Version != 4 || state.Resources == nil {
+		return false, errors.New("Terraform state is invalid")
+	}
+	for _, resource := range state.Resources {
+		if resource.Mode != "data" {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func (w *deploymentWorker) destroy(dir string, d deployment) {
+	defer w.releaseOperation()
+	err := w.destroyResources(dir)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if err == nil {
+		err = os.RemoveAll(dir)
+	}
+	if err != nil {
+		log.Printf("deployment %s cleanup failed: %v; state and worker lock retained", d.ID, err)
+		d.Status = "cleanup_failed"
+		if saveErr := saveDeployment(dir, d); saveErr != nil {
+			log.Printf("deployment %s cleanup status could not be saved: %v", d.ID, saveErr)
+		}
+		return
+	}
+	w.removeLock()
+}
+
+func (w *deploymentWorker) destroyResources(dir string) error {
+	_, err := readTerraformState(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		_, markerErr := os.Stat(filepath.Join(dir, ".never-applied"))
+		_, backupErr := os.Stat(filepath.Join(dir, "terraform.tfstate.backup"))
+		if markerErr == nil && errors.Is(backupErr, os.ErrNotExist) {
+			return nil
+		}
+		return errors.New("Terraform state is missing; operator recovery is required")
+	}
+	if err != nil {
+		return err
+	}
+	logFile, err := os.OpenFile(filepath.Join(dir, "terraform.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		return err
+	}
+	defer logFile.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Minute)
+	defer cancel()
+	for _, args := range [][]string{{"init", "-input=false", "-lockfile=readonly", "-no-color"},
+		{"destroy", "-input=false", "-auto-approve", "-no-color"}} {
+		if _, err := w.execute(ctx, dir, logFile, args...); err != nil {
+			return err
+		}
+	}
+	empty, err := readTerraformState(dir)
+	if err != nil {
+		return err
+	}
+	if !empty {
+		return errors.New("Terraform destroy left managed resources in state")
+	}
+	return nil
+}
+
 func (w *deploymentWorker) list(rw http.ResponseWriter) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	dirs, err := os.ReadDir(w.root)
 	if err != nil {
 		log.Printf("deployment listing failed: %v", err)
@@ -321,18 +597,9 @@ func (w *deploymentWorker) list(rw http.ResponseWriter) {
 			continue
 		}
 		dir := filepath.Join(w.root, entry.Name())
-		data, err := os.ReadFile(filepath.Join(dir, "result.json"))
-		if errors.Is(err, os.ErrNotExist) {
-			data, err = os.ReadFile(filepath.Join(dir, "deployment.json"))
-		}
+		d, err := readDeployment(dir, entry.Name())
 		if err != nil {
 			log.Printf("deployment metadata read failed: %v", err)
-			jsonError(rw, 500, "storage_error", "Unable to load deployments.")
-			return
-		}
-		var d deployment
-		if err := json.Unmarshal(data, &d); err != nil || d.ID != entry.Name() {
-			log.Printf("deployment metadata is invalid for %s", entry.Name())
 			jsonError(rw, 500, "storage_error", "Unable to load deployments.")
 			return
 		}

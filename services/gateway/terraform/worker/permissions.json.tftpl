@@ -66,10 +66,13 @@
       }
     },
     {
-      "Sid": "ReadTaggedDistributions",
+      "Sid": "ManageTaggedDistributions",
       "Effect": "Allow",
       "Action": [
         "cloudfront:GetDistribution",
+        "cloudfront:GetDistributionConfig",
+        "cloudfront:UpdateDistribution",
+        "cloudfront:DeleteDistribution",
         "cloudfront:ListTagsForResource"
       ],
       "Resource": "arn:aws:cloudfront::${account_id}:distribution/*",
@@ -84,9 +87,12 @@
       "Resource": "*"
     },
     {
-      "Sid": "ReadOriginAccessControls",
+      "Sid": "ReadAndDeleteOriginAccessControls",
       "Effect": "Allow",
-      "Action": "cloudfront:GetOriginAccessControl",
+      "Action": [
+        "cloudfront:GetOriginAccessControl",
+        "cloudfront:DeleteOriginAccessControl"
+      ],
       "Resource": "arn:aws:cloudfront::${account_id}:origin-access-control/*"
     }
   ]

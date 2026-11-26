@@ -55,3 +55,40 @@ it('shows server errors and returns focus when cancelled', async () => {
   fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
   expect(newDeployment).toHaveFocus();
 });
+
+it('requires confirmation and starts deletion only for completed deployments', async () => {
+  const api = vi.spyOn(apiModule, 'api').mockImplementation(async (_path, _session, options) => {
+    if (options?.method === 'DELETE') return { id: 'ready', name: 'Shop', region: 'us-west-2', status: 'deleting' };
+    return [
+      { id: 'ready', name: 'Shop', region: 'us-west-2', status: 'ready' },
+      { id: 'failed', name: 'Rocket', region: 'us-west-2', status: 'failed' },
+      { id: 'running', name: 'Busy', region: 'us-west-2', status: 'running' },
+    ];
+  });
+  render(<App authenticatedSession={session} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Delete Shop' }));
+  expect(screen.getByRole('button', { name: 'Delete Rocket' })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Delete Busy' })).not.toBeInTheDocument();
+  expect(api).not.toHaveBeenCalledWith('/api/deployments/ready', session, { method: 'DELETE' });
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel deletion' }));
+  expect(screen.queryByRole('button', { name: 'Confirm delete' })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Delete Shop' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm delete' }));
+  await waitFor(() => expect(api).toHaveBeenCalledWith('/api/deployments/ready', session, { method: 'DELETE' }));
+  expect(await screen.findByText('us-west-2 — deleting')).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Delete Shop' })).not.toBeInTheDocument();
+  expect(screen.getByRole('status')).toHaveTextContent('Resource deletion started');
+});
+
+it('shows cleanup errors without removing the deployment and allows retry confirmation', async () => {
+  vi.spyOn(apiModule, 'api').mockImplementation(async (_path, _session, options) => {
+    if (options?.method === 'DELETE') throw new Error('Worker busy');
+    return [{ id: 'failed', name: 'Rocket', region: 'us-west-2', status: 'cleanup_failed' }];
+  });
+  render(<App authenticatedSession={session} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Retry cleanup for Rocket' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm delete' }));
+  expect(await screen.findByRole('alert')).toHaveTextContent('Could not confirm cleanup: Worker busy');
+  expect(screen.getByText('us-west-2 — cleanup_failed')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Confirm delete' })).toBeEnabled();
+});

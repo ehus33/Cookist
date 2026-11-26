@@ -51,6 +51,9 @@ func TestServiceErrorsAndOriginPolicy(t *testing.T) {
 		if rec.Code != test.want {
 			t.Errorf("%s %s: got %d want %d", test.method, test.path, rec.Code, test.want)
 		}
+		if test.method == "OPTIONS" && !strings.Contains(rec.Header().Get("Access-Control-Allow-Methods"), "DELETE") {
+			t.Error("allowed origin cannot preflight deployment cleanup")
+		}
 	}
 }
 
