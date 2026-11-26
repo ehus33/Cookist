@@ -1,8 +1,132 @@
+import { useEffect, useRef, useState } from 'react';
+import type { FormEvent } from 'react';
+import { api, errorMessage } from './api';
 import type { Session } from './types';
+
+type DeploymentTemplate = 'blank' | 'business';
+type Deployment = { id: string; name: string; region: string; status: 'running' | 'ready' | 'failed'; url?: string };
+
+function isDeployment(value: unknown): value is Deployment {
+  if (!value || typeof value !== 'object') return false;
+  const d = value as Record<string, unknown>;
+  return typeof d.id === 'string' && typeof d.name === 'string' && typeof d.region === 'string'
+    && (d.status === 'running' || d.status === 'ready' || d.status === 'failed')
+    && (d.url === undefined || (typeof d.url === 'string' && /^https:\/\/[a-z0-9-]+\.cloudfront\.net$/.test(d.url)));
+}
+
+const awsRegions = [
+  ['us-east-1', 'US East (N. Virginia)'],
+  ['us-east-2', 'US East (Ohio)'],
+  ['us-west-1', 'US West (N. California)'],
+  ['us-west-2', 'US West (Oregon)'],
+  ['af-south-1', 'Africa (Cape Town)'],
+  ['ap-east-1', 'Asia Pacific (Hong Kong)'],
+  ['ap-east-2', 'Asia Pacific (Taipei)'],
+  ['ap-south-1', 'Asia Pacific (Mumbai)'],
+  ['ap-south-2', 'Asia Pacific (Hyderabad)'],
+  ['ap-southeast-1', 'Asia Pacific (Singapore)'],
+  ['ap-southeast-2', 'Asia Pacific (Sydney)'],
+  ['ap-southeast-3', 'Asia Pacific (Jakarta)'],
+  ['ap-southeast-4', 'Asia Pacific (Melbourne)'],
+  ['ap-southeast-5', 'Asia Pacific (Malaysia)'],
+  ['ap-southeast-6', 'Asia Pacific (New Zealand)'],
+  ['ap-southeast-7', 'Asia Pacific (Thailand)'],
+  ['ap-northeast-1', 'Asia Pacific (Tokyo)'],
+  ['ap-northeast-2', 'Asia Pacific (Seoul)'],
+  ['ap-northeast-3', 'Asia Pacific (Osaka)'],
+  ['ca-central-1', 'Canada (Central)'],
+  ['ca-west-1', 'Canada West (Calgary)'],
+  ['eu-central-1', 'Europe (Frankfurt)'],
+  ['eu-central-2', 'Europe (Zurich)'],
+  ['eu-west-1', 'Europe (Ireland)'],
+  ['eu-west-2', 'Europe (London)'],
+  ['eu-west-3', 'Europe (Paris)'],
+  ['eu-south-1', 'Europe (Milan)'],
+  ['eu-south-2', 'Europe (Spain)'],
+  ['eu-north-1', 'Europe (Stockholm)'],
+  ['il-central-1', 'Israel (Tel Aviv)'],
+  ['mx-central-1', 'Mexico (Central)'],
+  ['me-south-1', 'Middle East (Bahrain)'],
+  ['me-central-1', 'Middle East (UAE)'],
+  ['sa-east-1', 'South America (São Paulo)'],
+];
 
 export function App({ authenticatedSession, onSignOut, authError }: {
   authenticatedSession?: Session; onSignOut?: () => void; authError?: string;
 } = {}) {
+  const [creating, setCreating] = useState(false);
+  const [name, setName] = useState('');
+  const [region, setRegion] = useState('us-west-2');
+  const [template, setTemplate] = useState<DeploymentTemplate>('blank');
+  const [businessName, setBusinessName] = useState('');
+  const [listTitle, setListTitle] = useState('Services');
+  const [items, setItems] = useState('');
+  const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
+  const [deployments, setDeployments] = useState<Deployment[]>([]);
+  const [loadError, setLoadError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const newDeploymentButton = useRef<HTMLButtonElement>(null);
+  const requestVersion = useRef(0);
+
+  useEffect(() => {
+    if (!authenticatedSession) return;
+    const controller = new AbortController();
+    let loading = false;
+    async function load() {
+      if (loading) return;
+      loading = true;
+      const version = ++requestVersion.current;
+      try {
+        const result = await api<unknown>('/api/deployments', authenticatedSession, { signal: controller.signal });
+        if (!Array.isArray(result) || !result.every(isDeployment)) throw new Error('The server returned an invalid deployment list.');
+        if (!controller.signal.aborted && version === requestVersion.current) {
+          setDeployments(result);
+          setLoadError('');
+        }
+      } catch (error) {
+        if (!controller.signal.aborted && version === requestVersion.current) setLoadError(errorMessage(error));
+      } finally {
+        loading = false;
+      }
+    }
+    void load();
+    const timer = window.setInterval(() => { void load(); }, 5000);
+    return () => { controller.abort(); window.clearInterval(timer); };
+  }, [authenticatedSession]);
+
+  async function deploy(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!name.trim() || !region.trim() || (template === 'business' && (!businessName.trim() || !listTitle.trim()))) {
+      setMessage({ text: 'Complete all required fields before deploying.', error: true });
+      return;
+    }
+    if (!awsRegions.some(([code]) => code === region)) {
+      setMessage({ text: 'Select an available AWS region.', error: true });
+      return;
+    }
+    if (!authenticatedSession) {
+      setMessage({ text: 'Sign in as the configured operator to deploy.', error: true });
+      return;
+    }
+    setSubmitting(true);
+    setMessage(null);
+    try {
+      const result = await api<unknown>('/api/deployments', authenticatedSession, {
+        method: 'POST', body: { name, region, template, businessName, listTitle, items },
+      });
+      if (!isDeployment(result)) throw new Error('The server returned an invalid deployment.');
+      requestVersion.current++;
+      setDeployments(previous => [result, ...previous.filter(item => item.id !== result.id)]);
+      setCreating(false);
+      setLoadError('');
+      setMessage({ text: 'Deployment started. It may take several minutes.', error: false });
+    } catch (error) {
+      setMessage({ text: `Could not confirm deployment: ${errorMessage(error)} Check the deployment list before trying again.`, error: true });
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   return <main className="workspace">
     <header>
       <div>
@@ -12,9 +136,60 @@ export function App({ authenticatedSession, onSignOut, authError }: {
       {authenticatedSession && <button type="button" onClick={onSignOut}>Sign out</button>}
     </header>
     {authError && <p className="error" role="alert">{authError}</p>}
-    <section>
-      <h2>Workspace</h2>
-      <p>The workspace is being prepared.</p>
+    <section className="deployments">
+      <div className="section-heading">
+        <div><h2>Deployments</h2><p>Deploy a site to your AWS account.</p></div>
+        <button ref={newDeploymentButton} type="button" className="primary" onClick={() => { setCreating(true); setMessage(null); }}>
+          <span aria-hidden="true">+</span> New deployment
+        </button>
+      </div>
+      {!authenticatedSession && <p className="deployment-notice">Managed deployments require signing in as the configured operator.</p>}
+      {loadError && <p role="alert">{loadError}</p>}
+      {deployments.length > 0 && <ul className="deployment-list">
+        {deployments.map(deployment => <li key={deployment.id}>
+          <strong>{deployment.name}</strong> <span>{deployment.region} &mdash; {deployment.status}</span>
+          {deployment.url && <a href={deployment.url} target="_blank" rel="noreferrer">Open site</a>}
+          {deployment.status === 'failed' && <small>Deployment failed. An operator must inspect the private Terraform log and state.</small>}
+          {deployment.status === 'running' && <small>If the server was interrupted, an operator must check the worker and state before trying again.</small>}
+        </li>)}
+      </ul>}
+      {!creating && deployments.length === 0 && <div className="empty-state">
+        <h3>Start with a blank slate</h3>
+        <p>Or choose a business template for a menu, services, or another list.</p>
+      </div>}
+      {!creating && message && <p role={message.error ? 'alert' : 'status'}>{message.text}</p>}
+      {creating && <form className="deployment-form" onSubmit={event => void deploy(event)}>
+        <h3>Create a Terraform deployment</h3>
+        <label>Deployment name<input required maxLength={80} value={name} onChange={event => setName(event.target.value)} /></label>
+        <label>AWS region
+          <select required value={region} onChange={event => setRegion(event.target.value)}>
+            {awsRegions.map(([code, location]) => <option key={code} value={code}>{location} ({code})</option>)}
+          </select>
+        </label>
+        <p>Some regions must be enabled in your AWS account. CloudFront serves the site globally.</p>
+        <fieldset>
+          <legend>Choose a template</legend>
+          <label className="template-choice">
+            <input type="radio" name="template" checked={template === 'blank'} onChange={() => setTemplate('blank')} />
+            <span><strong>Blank slate</strong><small>Start with an empty site.</small></span>
+          </label>
+          <label className="template-choice">
+            <input type="radio" name="template" checked={template === 'business'} onChange={() => setTemplate('business')} />
+            <span><strong>Business listing</strong><small>A simple menu, service list, or other offering.</small></span>
+          </label>
+        </fieldset>
+        {template === 'business' && <div className="business-fields">
+          <label>Business name<input required maxLength={80} value={businessName} onChange={event => setBusinessName(event.target.value)} /></label>
+          <label>List title<input required maxLength={80} value={listTitle} onChange={event => setListTitle(event.target.value)} /></label>
+          <label>Items, one per line<textarea maxLength={2000} rows={4} value={items} onChange={event => setItems(event.target.value)} /></label>
+        </div>}
+        <p className="deployment-notice">Deploying creates a public static site on AWS S3 and CloudFront in the configured AWS account.
+          Anyone with the site URL can access it; it is not Tailscale-private.
+          AWS charges may apply until the resources are destroyed. The business template is a static list, not ordering or payments.</p>
+        <div className="form-actions"><button className="primary" type="submit" disabled={submitting || !authenticatedSession}>{submitting ? 'Starting...' : 'Deploy site'}</button>
+          <button type="button" className="secondary" disabled={submitting} onClick={() => { setCreating(false); setMessage(null); newDeploymentButton.current?.focus(); }}>Cancel</button></div>
+        {message && <p role={message.error ? 'alert' : 'status'}>{message.text}</p>}
+      </form>}
     </section>
   </main>;
 }

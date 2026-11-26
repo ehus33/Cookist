@@ -17,3 +17,9 @@ data/king_county_food_establishments.json
 .idea/
 *.xcuserstate
 xcuserdata/
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+*.tfvars.json
