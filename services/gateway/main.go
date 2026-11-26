@@ -74,6 +74,14 @@ func newGateway(coreURL, webDist string, origins []string, deployments *deployme
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
+		if r.URL.Path == "/api/billing/webhook" {
+			if deployments == nil {
+				jsonError(w, 503, "billing_unavailable", "Billing is not configured.")
+			} else {
+				deployments.billingRoute(w, r)
+			}
+			return
+		}
 		if r.URL.Path == "/health" {
 			if r.Method != http.MethodGet {
 				jsonError(w, 405, "method_not_allowed", "Use GET.")
@@ -108,7 +116,15 @@ func newGateway(coreURL, webDist string, origins []string, deployments *deployme
 				return
 			}
 			r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
-			if r.URL.Path == "/api/deployments" || strings.HasPrefix(r.URL.Path, "/api/deployments/") {
+			if strings.HasPrefix(r.URL.Path, "/api/billing/") {
+				if deployments == nil {
+					jsonError(w, 503, "billing_unavailable", "Billing is not configured.")
+				} else {
+					deployments.billingRoute(w, r)
+				}
+				return
+			}
+			if r.URL.Path == "/api/deployment-access" || r.URL.Path == "/api/deployments" || strings.HasPrefix(r.URL.Path, "/api/deployments/") {
 				if deployments == nil {
 					jsonError(w, 503, "deployments_disabled", "Deployments are not configured on this server.")
 				} else {
@@ -164,7 +180,8 @@ func requireCognito(next http.Handler, coreURL string) (http.Handler, error) {
 	}}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		clean := path.Clean("/" + r.URL.Path)
-		if !(clean == "/api" || strings.HasPrefix(clean, "/api/")) || r.Method == http.MethodOptions {
+		if !(clean == "/api" || strings.HasPrefix(clean, "/api/")) || r.Method == http.MethodOptions ||
+			(r.URL.Path == "/api/billing/webhook" && r.Method == http.MethodPost) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -211,6 +228,11 @@ func env(key, fallback string) string {
 func main() {
 	coreURL := env("CORE_URL", "http://127.0.0.1:8081")
 	mode := env("COOKIST_AUTH_MODE", "demo")
+	host := env("HOST", "127.0.0.1")
+	localAccess, err := localSubscriptionBypass(env("COOKIST_DEPLOYMENT_ACCESS_MODE", "hosted"), host)
+	if err != nil {
+		log.Fatal(err)
+	}
 	var deployments *deploymentWorker
 	switch env("COOKIST_DEPLOYMENTS_ENABLED", "false") {
 	case "false":
@@ -224,8 +246,29 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
+		deployments.accessFile = os.Getenv("COOKIST_DEPLOYMENT_ACCESS_FILE")
+		deployments.localAccess = localAccess
+		if _, err := loadAccessPolicy(deployments.accessFile); err != nil {
+			log.Fatalf("deployment access configuration is invalid: %v", err)
+		}
 	default:
 		log.Fatal("COOKIST_DEPLOYMENTS_ENABLED must be true or false")
+	}
+	switch env("COOKIST_BILLING_ENABLED", "false") {
+	case "false":
+	case "true":
+		if deployments == nil {
+			log.Fatal("Stripe billing requires the deployment worker to be enabled")
+		}
+		deployments.billing, err = newStripeBilling(
+			filepath.Join(deployments.root, ".billing"), os.Getenv("COOKIST_PUBLIC_ORIGIN"),
+			os.Getenv("COOKIST_STRIPE_PRICE_ID"), os.Getenv("COOKIST_STRIPE_SECRET_KEY"),
+			os.Getenv("COOKIST_STRIPE_WEBHOOK_SECRET"), env("COOKIST_STRIPE_MODE", "test"))
+		if err != nil {
+			log.Fatal(err)
+		}
+	default:
+		log.Fatal("COOKIST_BILLING_ENABLED must be true or false")
 	}
 	handler, err := newGateway(
 		coreURL, env("WEB_DIST", "apps/web/dist"),
@@ -246,7 +289,7 @@ func main() {
 		log.Fatal("COOKIST_AUTH_MODE must be demo or cognito")
 	}
 	server := &http.Server{
-		Addr: env("HOST", "127.0.0.1") + ":" + env("PORT", "8080"), Handler: handler,
+		Addr: net.JoinHostPort(host, env("PORT", "8080")), Handler: handler,
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
 		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 * 1024,
 	}

@@ -37,12 +37,18 @@ type deployment struct {
 	Status    string `json:"status"`
 	URL       string `json:"url,omitempty"`
 	CreatedAt string `json:"createdAt"`
+	TenantID  string `json:"tenantId,omitempty"`
+	CreatedBy string `json:"createdBy,omitempty"`
+	CanDelete bool   `json:"canDelete"`
 }
 
 const maxTestDeployments = 4
 
 type deploymentWorker struct {
 	coreURL, owner, root, terraform, account string
+	accessFile                               string
+	localAccess                              bool
+	billing                                  *stripeBilling
 	client                                   *http.Client
 	mu                                       sync.Mutex
 	execute                                  func(context.Context, string, io.Writer, ...string) ([]byte, error)
@@ -85,39 +91,39 @@ func newDeploymentWorker(coreURL, owner, root, terraform, account string) (*depl
 	return w, nil
 }
 
-func (w *deploymentWorker) authorize(r *http.Request) error {
+func (w *deploymentWorker) authorize(r *http.Request) (deploymentAccess, error) {
 	auth := r.Header.Get("Authorization")
 	if !strings.HasPrefix(auth, "Bearer ") || len(auth) > 16384 {
-		return &deploymentError{http.StatusUnauthorized, "unauthorized", "Sign in to continue."}
+		return deploymentAccess{}, &deploymentError{http.StatusUnauthorized, "unauthorized", "Sign in to continue."}
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(w.coreURL, "/")+"/api/me", nil)
 	if err != nil {
-		return err
+		return deploymentAccess{}, err
 	}
 	req.Header.Set("Authorization", auth)
 	res, err := w.client.Do(req)
 	if err != nil {
-		return err
+		return deploymentAccess{}, err
 	}
 	defer res.Body.Close()
 	if res.StatusCode == http.StatusUnauthorized {
-		return &deploymentError{http.StatusUnauthorized, "unauthorized", "Sign in to continue."}
+		return deploymentAccess{}, &deploymentError{http.StatusUnauthorized, "unauthorized", "Sign in to continue."}
 	}
 	if res.StatusCode != http.StatusOK {
-		return fmt.Errorf("identity service returned %d", res.StatusCode)
+		return deploymentAccess{}, fmt.Errorf("identity service returned %d", res.StatusCode)
 	}
 	var identity struct {
 		ActorID string `json:"actorId"`
 	}
 	if err := json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&identity); err != nil {
-		return err
+		return deploymentAccess{}, err
 	}
-	if identity.ActorID == "" || identity.ActorID != w.owner {
-		return &deploymentError{http.StatusForbidden, "forbidden", "Only the configured operator can manage deployments."}
+	if identity.ActorID == "" {
+		return deploymentAccess{}, errors.New("identity service returned an empty actor ID")
 	}
-	return nil
+	return w.accessFor(identity.ActorID)
 }
 
 type deploymentError struct {
@@ -128,13 +134,38 @@ type deploymentError struct {
 func (e *deploymentError) Error() string { return e.message }
 
 func (w *deploymentWorker) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
-	if err := w.authorize(r); err != nil {
+	access, err := w.authorize(r)
+	if err != nil {
 		var apiErr *deploymentError
 		if errors.As(err, &apiErr) {
 			jsonError(rw, apiErr.status, apiErr.code, apiErr.message)
 		} else {
 			log.Printf("deployment authorization unavailable: %v", err)
 			jsonError(rw, 503, "auth_unavailable", "Deployment authorization is unavailable.")
+		}
+		return
+	}
+	if r.URL.Path == "/api/deployment-access" {
+		if r.Method != http.MethodGet {
+			rw.Header().Set("Allow", "GET")
+			jsonError(rw, 405, "method_not_allowed", "Use GET.")
+			return
+		}
+		rw.Header().Set("Content-Type", "application/json")
+		rw.Header().Set("Cache-Control", "no-store")
+		_ = json.NewEncoder(rw).Encode(access)
+		return
+	}
+	action := "list"
+	if r.Method == http.MethodPost {
+		action = "create"
+	} else if r.Method == http.MethodDelete {
+		action = "delete"
+	}
+	if err := access.check(action, nil); err != nil {
+		var apiErr *deploymentError
+		if errors.As(err, &apiErr) {
+			jsonError(rw, apiErr.status, apiErr.code, apiErr.message)
 		}
 		return
 	}
@@ -146,7 +177,7 @@ func (w *deploymentWorker) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 			rw.Header().Set("Allow", "DELETE")
 			jsonError(rw, 405, "method_not_allowed", "Use DELETE.")
 		} else {
-			w.delete(rw, id)
+			w.delete(rw, id, access)
 		}
 		return
 	}
@@ -156,9 +187,9 @@ func (w *deploymentWorker) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		w.list(rw)
+		w.list(rw, access)
 	case http.MethodPost:
-		w.create(rw, r)
+		w.create(rw, r, access)
 	default:
 		rw.Header().Set("Allow", "GET, POST")
 		jsonError(rw, 405, "method_not_allowed", "Use GET or POST.")
@@ -175,7 +206,7 @@ func validateDeployment(req deploymentRequest) error {
 	return nil
 }
 
-func (w *deploymentWorker) create(rw http.ResponseWriter, r *http.Request) {
+func (w *deploymentWorker) create(rw http.ResponseWriter, r *http.Request, access deploymentAccess) {
 	var request deploymentRequest
 	decoder := json.NewDecoder(http.MaxBytesReader(rw, r.Body, 16384))
 	decoder.DisallowUnknownFields()
@@ -225,12 +256,32 @@ func (w *deploymentWorker) create(rw http.ResponseWriter, r *http.Request) {
 		jsonError(rw, 500, "storage_error", "Unable to check the deployment limit; operator recovery is required.")
 		return
 	}
-	count := 0
+	count, tenantCount := 0, 0
 	for _, entry := range entries {
 		name := entry.Name()
 		pendingID := strings.TrimSuffix(strings.TrimPrefix(name, "."), ".pending")
 		if idPattern.MatchString(name) || (name == "."+pendingID+".pending" && idPattern.MatchString(pendingID)) {
 			count++
+			if access.Role != "platform_owner" {
+				d, readErr := readDeployment(filepath.Join(w.root, name), name)
+				if readErr == nil {
+					d, readErr = w.ownedDeployment(d)
+				}
+				if readErr != nil {
+					log.Printf("tenant quota metadata check failed: %v", readErr)
+					w.removeLock()
+					jsonError(rw, 500, "storage_error", "Unable to verify deployment ownership; operator recovery is required.")
+					return
+				}
+				if d.TenantID == access.TenantID {
+					tenantCount++
+				}
+			}
+		}
+		if access.Role != "platform_owner" && tenantCount >= access.Limit {
+			w.removeLock()
+			jsonError(rw, 429, "tenant_deployment_limit", "Your organization has reached its deployment limit. Clean up an existing deployment before creating another.")
+			return
 		}
 	}
 	if count >= maxTestDeployments {
@@ -246,7 +297,8 @@ func (w *deploymentWorker) create(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d := deployment{ID: hex.EncodeToString(id[:]), Name: strings.TrimSpace(request.Name),
-		Region: request.Region, Status: "running", CreatedAt: time.Now().UTC().Format(time.RFC3339)}
+		Region: request.Region, Status: "running", CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		TenantID: access.TenantID, CreatedBy: access.ActorID}
 	dir := filepath.Join(w.root, d.ID)
 	staging := filepath.Join(w.root, "."+d.ID+".pending")
 	if err = os.Mkdir(staging, 0700); err == nil {
@@ -398,7 +450,7 @@ func readDeployment(dir, id string) (deployment, error) {
 	return d, nil
 }
 
-func (w *deploymentWorker) delete(rw http.ResponseWriter, id string) {
+func (w *deploymentWorker) delete(rw http.ResponseWriter, id string, access deploymentAccess) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if err := w.acquireOperation(); err != nil {
@@ -413,6 +465,9 @@ func (w *deploymentWorker) delete(rw http.ResponseWriter, id string) {
 	}()
 	dir := filepath.Join(w.root, id)
 	d, err := readDeployment(dir, id)
+	if err == nil {
+		d, err = w.ownedDeployment(d)
+	}
 	if errors.Is(err, os.ErrNotExist) {
 		jsonError(rw, 404, "not_found", "Deployment not found.")
 		return
@@ -420,6 +475,13 @@ func (w *deploymentWorker) delete(rw http.ResponseWriter, id string) {
 	if err != nil {
 		log.Printf("deployment cleanup metadata failed: %v", err)
 		jsonError(rw, 500, "storage_error", "Unable to read deployment state; operator recovery is required.")
+		return
+	}
+	if err := access.check("delete", &d); err != nil {
+		var apiErr *deploymentError
+		if errors.As(err, &apiErr) {
+			jsonError(rw, apiErr.status, apiErr.code, apiErr.message)
+		}
 		return
 	}
 	if d.Status != "ready" && d.Status != "failed" && d.Status != "cleanup_failed" {
@@ -582,7 +644,7 @@ func (w *deploymentWorker) destroyResources(dir string) error {
 	return nil
 }
 
-func (w *deploymentWorker) list(rw http.ResponseWriter) {
+func (w *deploymentWorker) list(rw http.ResponseWriter, access deploymentAccess) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	dirs, err := os.ReadDir(w.root)
@@ -598,12 +660,21 @@ func (w *deploymentWorker) list(rw http.ResponseWriter) {
 		}
 		dir := filepath.Join(w.root, entry.Name())
 		d, err := readDeployment(dir, entry.Name())
+		if err == nil {
+			d, err = w.ownedDeployment(d)
+		}
 		if err != nil {
 			log.Printf("deployment metadata read failed: %v", err)
 			jsonError(rw, 500, "storage_error", "Unable to load deployments.")
 			return
 		}
-		result = append(result, d)
+		if access.Role == "platform_owner" || d.TenantID == access.TenantID {
+			d.CanDelete = access.CanDelete
+			if access.PaymentRequired {
+				d.URL = ""
+			}
+			result = append(result, d)
+		}
 	}
 	rw.Header().Set("Content-Type", "application/json")
 	rw.Header().Set("Cache-Control", "no-store")
