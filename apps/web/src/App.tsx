@@ -4,13 +4,13 @@ import { api, errorMessage } from './api';
 import type { Session } from './types';
 
 type DeploymentTemplate = 'blank' | 'business';
-type Deployment = { id: string; name: string; region: string; status: 'running' | 'ready' | 'failed'; url?: string };
+type Deployment = { id: string; name: string; region: string; status: 'running' | 'ready' | 'failed' | 'deleting' | 'cleanup_failed'; url?: string };
 
 function isDeployment(value: unknown): value is Deployment {
   if (!value || typeof value !== 'object') return false;
   const d = value as Record<string, unknown>;
   return typeof d.id === 'string' && typeof d.name === 'string' && typeof d.region === 'string'
-    && (d.status === 'running' || d.status === 'ready' || d.status === 'failed')
+    && (d.status === 'running' || d.status === 'ready' || d.status === 'failed' || d.status === 'deleting' || d.status === 'cleanup_failed')
     && (d.url === undefined || (typeof d.url === 'string' && /^https:\/\/[a-z0-9-]+\.cloudfront\.net$/.test(d.url)));
 }
 
@@ -65,6 +65,8 @@ export function App({ authenticatedSession, onSignOut, authError }: {
   const [deployments, setDeployments] = useState<Deployment[]>([]);
   const [loadError, setLoadError] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [deleting, setDeleting] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Deployment | null>(null);
   const newDeploymentButton = useRef<HTMLButtonElement>(null);
   const requestVersion = useRef(0);
 
@@ -127,6 +129,26 @@ export function App({ authenticatedSession, onSignOut, authError }: {
     }
   }
 
+  async function deleteDeployment(target: Deployment) {
+    if (!authenticatedSession || deleting) return;
+    setDeleting(target.id);
+    setMessage(null);
+    try {
+      const result = await api<unknown>(`/api/deployments/${encodeURIComponent(target.id)}`, authenticatedSession, { method: 'DELETE' });
+      if (!isDeployment(result) || result.id !== target.id || result.status !== 'deleting') {
+        throw new Error('The server returned an invalid cleanup response.');
+      }
+      requestVersion.current++;
+      setDeployments(previous => previous.map(item => item.id === result.id ? result : item));
+      setDeleteTarget(null);
+      setMessage({ text: 'Resource deletion started. CloudFront cleanup may take several minutes. The deployment disappears only after cleanup succeeds.', error: false });
+    } catch (error) {
+      setMessage({ text: `Could not confirm cleanup: ${errorMessage(error)} Check the deployment list before trying again.`, error: true });
+    } finally {
+      setDeleting(null);
+    }
+  }
+
   return <main className="workspace">
     <header>
       <div>
@@ -151,8 +173,24 @@ export function App({ authenticatedSession, onSignOut, authError }: {
           {deployment.url && <a href={deployment.url} target="_blank" rel="noreferrer">Open site</a>}
           {deployment.status === 'failed' && <small>Deployment failed. An operator must inspect the private Terraform log and state.</small>}
           {deployment.status === 'running' && <small>If the server was interrupted, an operator must check the worker and state before trying again.</small>}
+          {deployment.status === 'deleting' && <small>Deleting AWS resources. State is retained until cleanup succeeds.</small>}
+          {deployment.status === 'cleanup_failed' && <small>Cleanup failed. State is retained; inspect the private Terraform log, fix the cause, then retry cleanup.</small>}
+          {(deployment.status === 'ready' || deployment.status === 'failed' || deployment.status === 'cleanup_failed') &&
+            <button type="button" disabled={!!deleting} onClick={() => { setDeleteTarget(deployment); setMessage(null); }}
+              aria-label={`${deployment.status === 'cleanup_failed' ? 'Retry cleanup for' : 'Delete'} ${deployment.name}`}>
+              {deployment.status === 'cleanup_failed' ? 'Retry cleanup' : 'Delete resources'}
+            </button>}
         </li>)}
       </ul>}
+      {deleteTarget && <section role="region" aria-label={`Confirm deletion of ${deleteTarget.name}`}>
+        <h3>Delete {deleteTarget.name}?</h3>
+        <p>This permanently deletes this deployment's AWS resources and site content. After successful cleanup,
+          its saved state is removed and its deployment slot is freed. Previously incurred AWS charges are not refunded.</p>
+        <button type="button" className="primary" disabled={!!deleting} onClick={() => void deleteDeployment(deleteTarget)}>
+          {deleting ? 'Starting cleanup...' : 'Confirm delete'}
+        </button>
+        <button type="button" disabled={!!deleting} onClick={() => setDeleteTarget(null)}>Cancel deletion</button>
+      </section>}
       {!creating && deployments.length === 0 && <div className="empty-state">
         <h3>Start with a blank slate</h3>
         <p>Or choose a business template for a menu, services, or another list.</p>

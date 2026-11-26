@@ -58,12 +58,12 @@ the shared worker lock and rejects additional creation requests with HTTP 429
 (`deployment_limit`) before starting Terraform. Existing, running, failed,
 and pending deployment directories all reserve slots, even if metadata is
 missing or invalid. The cap survives restarts; it does not delete existing sites
-or automatically free a slot after manual destruction.
+or automatically free a slot after manual destruction. Successful portal cleanup
+removes the deployment directory and frees its slot.
 
 Use one durable `COOKIST_DEPLOYMENT_ROOT` for all workers and users; separate
 directories, installations, or Terraform runs outside the worker are not covered
-by this cap. Keep state and deployment directories after cleanup rather than
-deleting them to bypass the limit. This is a conservative test-phase creation
+by this cap. Never manually delete state to bypass the limit. This is a conservative test-phase active-site
 cap, not an AWS account-wide quota, spending limit, or automatic cleanup policy.
 Deployment access remains restricted to the configured operator.
 
@@ -146,12 +146,13 @@ no IAM administration, `iam:PassRole`, KMS, access-point, Object Lambda, or
 S3 Express permissions are granted. S3 access is limited to this account's
 `cookist-<account-id>-*` bucket namespace and `index.html` objects. New CloudFront
 distributions require the reserved `CookistManaged=test-site` tag; distribution
-reads require that tag. The worker cannot update or delete distributions.
+reads, updates (needed to disable a distribution), and deletion require that tag.
 Do not assign the reserved tag to unrelated distributions.
 CloudFront creation uses resource `*` where the API cannot resource-scope it.
-Origin access controls cannot be tag-scoped: the worker can create and read them,
-but cannot update or delete them. Use an authorized cleanup identity to destroy
-the full site, including its origin access control, with the original state.
+Origin access controls cannot be tag-scoped: the worker can create, read, and
+delete them within this account. Cleanup uses only resources in the original
+deployment state. Reapply the worker role's updated permissions before using
+cleanup; existing hosted inline policies are not changed by rebuilding the app.
 
 Create a separate AWS profile with `role_arn` set to the new worker role and
 `source_profile` set to the bootstrap SSO profile. Set `AWS_PROFILE` in local
@@ -168,15 +169,33 @@ configured before storing real site data. Enable CloudTrail, S3 access/data-even
 logging, and CloudWatch monitoring before real use. The scoped role and four-site
 cap are not a billing cap or a production isolation boundary.
 
-The worker runs one deployment at a time and persists its status. A failed
+The worker runs one deployment or cleanup at a time and persists its status. A failed
 apply or interrupted process may leave billable resources and partial state.
 The worker retains `.worker.lock` in those cases and refuses further deployments.
-Before removing that lock, stop the worker, verify no Terraform process is
+Use **Delete resources** on a ready or failed deployment and confirm permanent
+deletion. `DELETE /api/deployments/<id>` is operator-only and returns HTTP 202
+with `deleting` status. Terraform runs `init` with the original provider lock
+file, then `destroy` using the original configuration, variables, and state.
+CloudFront disabling/deletion can take several minutes; cleanup has a 90-minute
+timeout. Only after destroy succeeds and state contains no managed resources
+does the worker remove the local deployment directory and release the slot.
+This does not delete the Cookist servers or refund incurred charges.
+
+A failed cleanup becomes `cleanup_failed`: state, logs, and the worker lock are
+retained. Fix the logged cause (including missing permissions), then use
+**Retry cleanup**. Missing/corrupt state is never treated as successful cleanup.
+New jobs that failed before any apply are safe to clean without state; older
+jobs without state require manual recovery. An older empty worker lock is
+recoverable only for the sole failed job, with no running/pending/invalid jobs.
+`.operation.lock` prevents concurrent cleanup/creation, including across workers.
+
+Interrupted running/deleting jobs or a stale operation lock require manual
+recovery, not an automatic retry. Before removing either lock, stop the worker, verify no Terraform process is
 running, and inspect the private log and state; reconcile or destroy any
 resources with Terraform using the same state and authorized credentials.
-Do not delete the state directory. There is currently no destroy or retry
-button: use Terraform in the individual deployment directory to destroy a site,
-and verify removal in AWS. A worker restart does not automatically retry jobs.
+Do not delete the state directory. For manual recovery, use Terraform in the
+individual deployment directory and verify removal in AWS. A worker restart
+does not automatically retry jobs.
 Configure access logging, CloudTrail data events and CloudWatch monitoring before
 real use. This initial worker is not a production multi-tenant deployment service.
 
