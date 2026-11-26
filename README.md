@@ -399,8 +399,13 @@ The policy was narrowed from IAM Policy Autopilot's site-plan baseline:
 no IAM administration, `iam:PassRole`, KMS, access-point, Object Lambda, or
 S3 Express permissions are granted. S3 access is limited to this account's
 `cookist-<account-id>-*` bucket namespace and `index.html` objects. New CloudFront
-distributions require the reserved `CookistManaged=test-site` tag; distribution
+distributions require the reserved `CookistManaged=test-site` tag; configuration
 reads, updates (needed to disable a distribution), and deletion require that tag.
+The read-only `GetDistribution` check uses a wildcard resource without a tag
+condition: after deletion, CloudFront cannot resolve the resource's ARN or tags,
+and Terraform must receive `NoSuchDistribution` rather than `AccessDenied`.
+`aws:ResourceAccount` restricts this read to the configured account when AWS
+supplies resource-account context; missing-resource checks also remain allowed.
 Do not assign the reserved tag to unrelated distributions.
 CloudFront creation uses resource `*` where the API cannot resource-scope it.
 Origin access controls cannot be tag-scoped: the worker can create, read, and

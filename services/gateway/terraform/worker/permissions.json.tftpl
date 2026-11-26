@@ -66,10 +66,18 @@
       }
     },
     {
+      "Sid": "ReadDistributionDeletionStatus",
+      "Effect": "Allow",
+      "Action": "cloudfront:GetDistribution",
+      "Resource": "*",
+      "Condition": {
+        "StringEqualsIfExists": { "aws:ResourceAccount": "${account_id}" }
+      }
+    },
+    {
       "Sid": "ManageTaggedDistributions",
       "Effect": "Allow",
       "Action": [
-        "cloudfront:GetDistribution",
         "cloudfront:GetDistributionConfig",
         "cloudfront:UpdateDistribution",
         "cloudfront:DeleteDistribution",
