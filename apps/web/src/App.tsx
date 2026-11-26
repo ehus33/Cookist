@@ -5,6 +5,16 @@ import type { Session } from './types';
 
 type DeploymentTemplate = 'blank' | 'business';
 type Deployment = { id: string; name: string; region: string; status: 'running' | 'ready' | 'failed' | 'deleting' | 'cleanup_failed'; url?: string };
+type DeploymentAccess = { role: string; subscribed: boolean; canList: boolean; canCreate: boolean; canDelete: boolean };
+
+function isDeploymentAccess(value: unknown): value is DeploymentAccess {
+  if (!value || typeof value !== 'object') return false;
+  const access = value as Record<string, unknown>;
+  return typeof access.role === 'string'
+    && ['platform_owner', 'customer_admin', 'deployer', 'viewer', 'none'].includes(access.role)
+    && typeof access.subscribed === 'boolean' && typeof access.canList === 'boolean'
+    && typeof access.canCreate === 'boolean' && typeof access.canDelete === 'boolean';
+}
 
 function isDeployment(value: unknown): value is Deployment {
   if (!value || typeof value !== 'object') return false;
@@ -67,11 +77,28 @@ export function App({ authenticatedSession, onSignOut, authError }: {
   const [submitting, setSubmitting] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Deployment | null>(null);
+  const [access, setAccess] = useState<DeploymentAccess | null>(null);
+  const [loadedActor, setLoadedActor] = useState<string | null>(null);
+  const currentAccess = loadedActor === authenticatedSession?.actorId ? access : null;
+  const visibleDeployments = loadedActor === authenticatedSession?.actorId ? deployments : [];
   const newDeploymentButton = useRef<HTMLButtonElement>(null);
   const requestVersion = useRef(0);
+  const sessionVersion = useRef(0);
 
   useEffect(() => {
+    sessionVersion.current++;
+    requestVersion.current++;
+    setAccess(null);
+    setLoadedActor(null);
+    setDeployments([]);
+    setCreating(false);
+    setDeleteTarget(null);
+    setMessage(null);
+    setLoadError('');
+    setSubmitting(false);
+    setDeleting(null);
     if (!authenticatedSession) return;
+    const session = authenticatedSession;
     const controller = new AbortController();
     let loading = false;
     async function load() {
@@ -79,21 +106,34 @@ export function App({ authenticatedSession, onSignOut, authError }: {
       loading = true;
       const version = ++requestVersion.current;
       try {
-        const result = await api<unknown>('/api/deployments', authenticatedSession, { signal: controller.signal });
+        const permissions = await api<unknown>('/api/deployment-access', session, { signal: controller.signal });
+        if (!isDeploymentAccess(permissions)) throw new Error('The server returned invalid access permissions.');
+        const result = permissions.canList
+          ? await api<unknown>('/api/deployments', session, { signal: controller.signal }) : [];
         if (!Array.isArray(result) || !result.every(isDeployment)) throw new Error('The server returned an invalid deployment list.');
         if (!controller.signal.aborted && version === requestVersion.current) {
           setDeployments(result);
+          setAccess(permissions);
+          setLoadedActor(session.actorId);
+          if (!permissions.canCreate) setCreating(false);
+          if (!permissions.canDelete) setDeleteTarget(null);
           setLoadError('');
         }
       } catch (error) {
-        if (!controller.signal.aborted && version === requestVersion.current) setLoadError(errorMessage(error));
+        if (!controller.signal.aborted && version === requestVersion.current) {
+          setAccess(null);
+          setDeployments([]);
+          setCreating(false);
+          setDeleteTarget(null);
+          setLoadError(errorMessage(error));
+        }
       } finally {
         loading = false;
       }
     }
     void load();
     const timer = window.setInterval(() => { void load(); }, 5000);
-    return () => { controller.abort(); window.clearInterval(timer); };
+    return () => { sessionVersion.current++; controller.abort(); window.clearInterval(timer); };
   }, [authenticatedSession]);
 
   async function deploy(event: FormEvent<HTMLFormElement>) {
@@ -106,16 +146,18 @@ export function App({ authenticatedSession, onSignOut, authError }: {
       setMessage({ text: 'Select an available AWS region.', error: true });
       return;
     }
-    if (!authenticatedSession) {
-      setMessage({ text: 'Sign in as the configured operator to deploy.', error: true });
+    if (!authenticatedSession || !currentAccess?.canCreate) {
+      setMessage({ text: 'Your account does not currently have permission to deploy.', error: true });
       return;
     }
     setSubmitting(true);
     setMessage(null);
+    const version = sessionVersion.current;
     try {
       const result = await api<unknown>('/api/deployments', authenticatedSession, {
         method: 'POST', body: { name, region, template, businessName, listTitle, items },
       });
+      if (version !== sessionVersion.current) return;
       if (!isDeployment(result)) throw new Error('The server returned an invalid deployment.');
       requestVersion.current++;
       setDeployments(previous => [result, ...previous.filter(item => item.id !== result.id)]);
@@ -123,18 +165,20 @@ export function App({ authenticatedSession, onSignOut, authError }: {
       setLoadError('');
       setMessage({ text: 'Deployment started. It may take several minutes.', error: false });
     } catch (error) {
-      setMessage({ text: `Could not confirm deployment: ${errorMessage(error)} Check the deployment list before trying again.`, error: true });
+      if (version === sessionVersion.current) setMessage({ text: `Could not confirm deployment: ${errorMessage(error)} Check the deployment list before trying again.`, error: true });
     } finally {
-      setSubmitting(false);
+      if (version === sessionVersion.current) setSubmitting(false);
     }
   }
 
   async function deleteDeployment(target: Deployment) {
-    if (!authenticatedSession || deleting) return;
+    if (!authenticatedSession || !currentAccess?.canDelete || deleting) return;
     setDeleting(target.id);
     setMessage(null);
+    const version = sessionVersion.current;
     try {
       const result = await api<unknown>(`/api/deployments/${encodeURIComponent(target.id)}`, authenticatedSession, { method: 'DELETE' });
+      if (version !== sessionVersion.current) return;
       if (!isDeployment(result) || result.id !== target.id || result.status !== 'deleting') {
         throw new Error('The server returned an invalid cleanup response.');
       }
@@ -143,9 +187,9 @@ export function App({ authenticatedSession, onSignOut, authError }: {
       setDeleteTarget(null);
       setMessage({ text: 'Resource deletion started. CloudFront cleanup may take several minutes. The deployment disappears only after cleanup succeeds.', error: false });
     } catch (error) {
-      setMessage({ text: `Could not confirm cleanup: ${errorMessage(error)} Check the deployment list before trying again.`, error: true });
+      if (version === sessionVersion.current) setMessage({ text: `Could not confirm cleanup: ${errorMessage(error)} Check the deployment list before trying again.`, error: true });
     } finally {
-      setDeleting(null);
+      if (version === sessionVersion.current) setDeleting(null);
     }
   }
 
@@ -161,28 +205,39 @@ export function App({ authenticatedSession, onSignOut, authError }: {
     <section className="deployments">
       <div className="section-heading">
         <div><h2>Deployments</h2><p>Deploy a site to your AWS account.</p></div>
-        <button ref={newDeploymentButton} type="button" className="primary" onClick={() => { setCreating(true); setMessage(null); }}>
+        <button ref={newDeploymentButton} type="button" className="primary" disabled={!!authenticatedSession && !currentAccess?.canCreate}
+          onClick={() => { setCreating(true); setMessage(null); }}>
           <span aria-hidden="true">+</span> New deployment
         </button>
       </div>
-      {!authenticatedSession && <p className="deployment-notice">Managed deployments require signing in as the configured operator.</p>}
+      {!authenticatedSession && <p className="deployment-notice">Managed deployments require signing in with an authorized account.</p>}
+      {authenticatedSession && !currentAccess && !loadError && <p role="status">Checking deployment access...</p>}
+      {currentAccess && !currentAccess.canList && <section aria-label="Access required">
+        <h3>Access required</h3>
+        <p>Your account has not been granted access. Paid access is not available yet; contact the operator.</p>
+      </section>}
+      {currentAccess?.canList && !currentAccess.subscribed && <p className="deployment-notice">
+        An active subscription is required to create deployments. You can still view existing resources
+        and, if your role permits, delete them to stop further usage charges. Checkout is not available yet.
+      </p>}
+      {currentAccess?.role === 'viewer' && <p className="deployment-notice">Your role provides read-only deployment access.</p>}
       {loadError && <p role="alert">{loadError}</p>}
-      {deployments.length > 0 && <ul className="deployment-list">
-        {deployments.map(deployment => <li key={deployment.id}>
+      {visibleDeployments.length > 0 && <ul className="deployment-list">
+        {visibleDeployments.map(deployment => <li key={deployment.id}>
           <strong>{deployment.name}</strong> <span>{deployment.region} &mdash; {deployment.status}</span>
           {deployment.url && <a href={deployment.url} target="_blank" rel="noreferrer">Open site</a>}
           {deployment.status === 'failed' && <small>Deployment failed. An operator must inspect the private Terraform log and state.</small>}
           {deployment.status === 'running' && <small>If the server was interrupted, an operator must check the worker and state before trying again.</small>}
           {deployment.status === 'deleting' && <small>Deleting AWS resources. State is retained until cleanup succeeds.</small>}
           {deployment.status === 'cleanup_failed' && <small>Cleanup failed. State is retained; inspect the private Terraform log, fix the cause, then retry cleanup.</small>}
-          {(deployment.status === 'ready' || deployment.status === 'failed' || deployment.status === 'cleanup_failed') &&
+          {currentAccess?.canDelete && (deployment.status === 'ready' || deployment.status === 'failed' || deployment.status === 'cleanup_failed') &&
             <button type="button" disabled={!!deleting} onClick={() => { setDeleteTarget(deployment); setMessage(null); }}
               aria-label={`${deployment.status === 'cleanup_failed' ? 'Retry cleanup for' : 'Delete'} ${deployment.name}`}>
               {deployment.status === 'cleanup_failed' ? 'Retry cleanup' : 'Delete resources'}
             </button>}
         </li>)}
       </ul>}
-      {deleteTarget && <section role="region" aria-label={`Confirm deletion of ${deleteTarget.name}`}>
+      {deleteTarget && currentAccess?.canDelete && <section role="region" aria-label={`Confirm deletion of ${deleteTarget.name}`}>
         <h3>Delete {deleteTarget.name}?</h3>
         <p>This permanently deletes this deployment's AWS resources and site content. After successful cleanup,
           its saved state is removed and its deployment slot is freed. Previously incurred AWS charges are not refunded.</p>
@@ -191,12 +246,12 @@ export function App({ authenticatedSession, onSignOut, authError }: {
         </button>
         <button type="button" disabled={!!deleting} onClick={() => setDeleteTarget(null)}>Cancel deletion</button>
       </section>}
-      {!creating && deployments.length === 0 && <div className="empty-state">
+      {!creating && visibleDeployments.length === 0 && (!authenticatedSession || currentAccess?.canList) && <div className="empty-state">
         <h3>Start with a blank slate</h3>
         <p>Or choose a business template for a menu, services, or another list.</p>
       </div>}
       {!creating && message && <p role={message.error ? 'alert' : 'status'}>{message.text}</p>}
-      {creating && <form className="deployment-form" onSubmit={event => void deploy(event)}>
+      {creating && (!authenticatedSession || currentAccess?.canCreate) && <form className="deployment-form" onSubmit={event => void deploy(event)}>
         <h3>Create a Terraform deployment</h3>
         <label>Deployment name<input required maxLength={80} value={name} onChange={event => setName(event.target.value)} /></label>
         <label>AWS region

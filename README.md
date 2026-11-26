@@ -2,7 +2,8 @@
 
 Cookist is being refocused on deployments. The repository currently contains a
 neutral web and native workspace, a Go gateway, and a Kotlin authentication
-service. An optional operator-only worker can create Terraform-managed sites.
+service. An optional owner-default worker can create Terraform-managed sites,
+with configurable tenant roles and entitlement checks.
 It is disabled until explicitly configured.
 
 The AWS demo uses the neutral workspace and experimental Cognito authentication.
@@ -12,7 +13,7 @@ The private hosted test now runs the deployment gateway and core together on
 the existing EC2 worker, behind the Lightsail/Tailscale reverse proxy.
 The gateway uses short-lived EC2 instance-role credentials with the scoped
 test-site policy, not administrator SSO credentials or stored access keys.
-Deployment access is limited to the configured operator and the four-site cap
+The currently hosted build uses operator-only access and the four-site cap
 below. Encrypted EBS and daily encrypted snapshots protect the state volume.
 The hosted gateway's `ALLOWED_ORIGINS` must include `https://trymachi.com`;
 otherwise browser deployment submissions are rejected even when listing works.
@@ -65,7 +66,71 @@ Use one durable `COOKIST_DEPLOYMENT_ROOT` for all workers and users; separate
 directories, installations, or Terraform runs outside the worker are not covered
 by this cap. Never manually delete state to bypass the limit. This is a conservative test-phase active-site
 cap, not an AWS account-wide quota, spending limit, or automatic cleanup policy.
-Deployment access remains restricted to the configured operator.
+Deployment access defaults to the configured operator. Optional server-managed
+RBAC/ABAC grants tenant-scoped customer access as described below.
+
+### Deployment RBAC and ABAC
+
+`COOKIST_DEPLOYMENT_OWNER` identifies the platform owner by the full verified
+Cognito actor ID returned by `/api/me`, not an email or a browser-provided role.
+The owner can view/manage all deployments and bypass subscription and tenant
+quotas, but not the shared four-site cap or worker serialization.
+
+Leave `COOKIST_DEPLOYMENT_ACCESS_FILE` empty to keep everyone else denied.
+To grant customer access, set it to an absolute path to a private JSON policy:
+
+```json
+{
+  "version": 1,
+  "members": {
+    "<verified-actor-id>": { "tenantId": "example-org", "role": "deployer" }
+  },
+  "tenants": {
+    "example-org": {
+      "subscriptionStatus": "inactive",
+      "deploymentLimit": 1
+    }
+  }
+}
+```
+
+Replace the placeholder with the verified actor ID. Roles are `customer_admin`,
+`deployer`, and `viewer`. All members can list only their tenant's deployments.
+Customer admins and deployers can create with an active entitlement and delete
+completed deployments belonging to that tenant; viewers cannot mutate resources.
+Customer-admin membership does not grant platform administration or a billing
+management API. Membership changes remain operator-managed in this initial version.
+Each identity belongs to one tenant; `owner` is reserved for legacy owner resources.
+
+To grant an active entitlement, use `"subscriptionStatus": "active"` and a
+`"validUntil"` RFC3339 UTC timestamp. Creation is denied at expiry. Inactive
+entitlements must omit `validUntil`. Viewing and authorized deletion remain
+available after expiry to allow cost cleanup. Unknown identities are denied.
+The web app shows access-required, expired-entitlement, or read-only notices
+and hides/disables unavailable actions; backend checks remain authoritative.
+`GET /api/deployment-access` returns the caller's permissions, never the member directory.
+
+The policy is re-read and validated on each request; invalid/missing configured
+files fail closed (HTTP 503), including for the owner. Replace it atomically so
+requests never observe a partially written policy. Restrict write access to the
+operator and mount it read-only into containers at the configured path using a
+deployment-specific Compose override. Do not store this file in the writable
+Terraform state volume or commit populated identities/entitlements.
+
+New deployment metadata contains server-assigned `tenantId` and `createdBy`.
+Legacy metadata without both fields is treated as owned by the platform owner;
+it is never assigned to a customer. Original Terraform configuration/state is
+not rewritten. Cross-tenant deletion returns HTTP 404. Tenant quotas include
+running/failed/retained deployments and are checked under the same exclusive
+worker lock as the global cap. Unverifiable ownership blocks customer creation.
+
+This implements authorization and an entitlement gate, **not payment collection**.
+There is no checkout or webhook yet; do not claim subscriptions are purchased
+or verified by this file. A future billing integration must verify signed payment
+webhooks and update trusted entitlement storage, not accept checkout redirects,
+client-supplied subscription flags, roles, or tenant IDs. The shared worker AWS
+identity is unchanged: this is application-level isolation, not separate AWS
+accounts, per-tenant IAM identities, or a production multi-tenant security boundary.
 
 Select a commercial AWS Region for the S3 bucket. The list is not filtered by
 account: some regions require opting in before use. CloudFront is global.
@@ -173,7 +238,8 @@ The worker runs one deployment or cleanup at a time and persists its status. A f
 apply or interrupted process may leave billable resources and partial state.
 The worker retains `.worker.lock` in those cases and refuses further deployments.
 Use **Delete resources** on a ready or failed deployment and confirm permanent
-deletion. `DELETE /api/deployments/<id>` is operator-only and returns HTTP 202
+deletion. `DELETE /api/deployments/<id>` requires an authorized management role
+and matching tenant (or the platform owner) and returns HTTP 202
 with `deleting` status. Terraform runs `init` with the original provider lock
 file, then `destroy` using the original configuration, variables, and state.
 CloudFront disabling/deletion can take several minutes; cleanup has a 90-minute

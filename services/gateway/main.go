@@ -108,7 +108,7 @@ func newGateway(coreURL, webDist string, origins []string, deployments *deployme
 				return
 			}
 			r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
-			if r.URL.Path == "/api/deployments" || strings.HasPrefix(r.URL.Path, "/api/deployments/") {
+			if r.URL.Path == "/api/deployment-access" || r.URL.Path == "/api/deployments" || strings.HasPrefix(r.URL.Path, "/api/deployments/") {
 				if deployments == nil {
 					jsonError(w, 503, "deployments_disabled", "Deployments are not configured on this server.")
 				} else {
@@ -223,6 +223,10 @@ func main() {
 			os.Getenv("COOKIST_DEPLOYMENT_ROOT"), os.Getenv("COOKIST_TERRAFORM_PATH"), os.Getenv("COOKIST_AWS_ACCOUNT_ID"))
 		if err != nil {
 			log.Fatal(err)
+		}
+		deployments.accessFile = os.Getenv("COOKIST_DEPLOYMENT_ACCESS_FILE")
+		if _, err := loadAccessPolicy(deployments.accessFile); err != nil {
+			log.Fatalf("deployment access configuration is invalid: %v", err)
 		}
 	default:
 		log.Fatal("COOKIST_DEPLOYMENTS_ENABLED must be true or false")
