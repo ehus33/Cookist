@@ -343,10 +343,10 @@ preserved. Funnel is beta and subject to bandwidth limits; monitor Stripe's
 delivery retries. Nginx and Tailscale are enabled services, and the Funnel
 configuration is persistent.
 
-The existing worker now runs `cookist-gateway:paired-a27f19cc3554`, built from merged
-commit `56d015521ca396b0614ff24596befb2599e50f9f` plus the current web 1.7.0 package
+The existing worker now runs `cookist-gateway:sidebar-4908fe4317b2`, built from merged
+commit `56d015521ca396b0614ff24596befb2599e50f9f` plus the current web 1.7.1 package
 metadata and validated generated-site favicon, storefront, visual-builder, and
-two-column element source changes. Hosted customers can
+two-column element and square-icon sidebar source changes. Hosted customers can
 choose Classic, Modern, Warm, or Bold styles with live previews, including on
 mobile. Billing uses the Glaucous Zipline
 **test sandbox**, not live payments. Its enabled snapshot destination listens
@@ -364,6 +364,10 @@ and exact deployment payload. Generated builder HTML was separately verified
 locally in all four styles, including equal-width desktop columns, stacking at
 600px and below, and no horizontal overflow at 390px.
 These editor checks did not create AWS sites or make payments.
+The deployed icon sidebar was verified at 1440, 900, 641, 640, 390, and 320px:
+square labeled tiles, desktop/tablet sidebar placement, phone grid, visible
+keyboard focus, sticky scrolling, actual tile dragging, and no horizontal
+overflow. The existing builder and paired-element browser checks also passed.
 Storefront product editing and submission were exercised against the deployed
 frontend with isolated API fixtures. Actual Go-generated storefront pages were
 verified in all four styles at 390px width, and a real one-time Stripe sandbox
@@ -382,7 +386,9 @@ The flow was verified with a fresh account while the policy had no memberships.
 Other installations remain administrator-approved unless they explicitly enable
 the setting described above.
 
-The previous stacked-builder gateway is retained as
+The previous paired-builder gateway is retained as
+`cookist-gateway-before-sidebar-4908fe4317b2`, with environment and startup backups
+ending in `.before-sidebar-4908fe4317b2`. The previous stacked-builder gateway is retained as
 `cookist-gateway-before-paired-a27f19cc3554`, with environment and startup backups
 ending in `.before-paired-a27f19cc3554`. The previous storefront gateway is retained as
 `cookist-gateway-before-builder-4ac4bb44b042`, with environment and startup backups
