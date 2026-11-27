@@ -60,6 +60,14 @@ func newGateway(coreURL, webDist string, origins []string, deployments *deployme
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "same-origin")
 		w.Header().Set("X-Frame-Options", "DENY")
+		if strings.HasPrefix(r.URL.Path, "/forms/") {
+			if deployments == nil {
+				jsonError(w, 503, "forms_unavailable", "Lead forms are not configured.")
+			} else {
+				deployments.receiveSubmission(w, r)
+			}
+			return
+		}
 		if origin := r.Header.Get("Origin"); origin != "" {
 			w.Header().Add("Vary", "Origin")
 			if !allowed[origin] {
@@ -68,7 +76,7 @@ func newGateway(coreURL, webDist string, origins []string, deployments *deployme
 			}
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -111,11 +119,15 @@ func newGateway(coreURL, webDist string, origins []string, deployments *deployme
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/api" {
-			if r.ContentLength > 64*1024 {
-				jsonError(w, 413, "body_too_large", "Request body exceeds 64 KiB.")
+			limit := int64(64 * 1024)
+			if r.URL.Path == "/api/builder-draft" || r.URL.Path == "/api/deployments" || strings.HasSuffix(r.URL.Path, "/design") {
+				limit = 524288
+			}
+			if r.ContentLength > limit {
+				jsonError(w, 413, "body_too_large", "Request body exceeds the route's size limit.")
 				return
 			}
-			r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
 			if strings.HasPrefix(r.URL.Path, "/api/billing/") {
 				if deployments == nil {
 					jsonError(w, 503, "billing_unavailable", "Billing is not configured.")
@@ -124,7 +136,7 @@ func newGateway(coreURL, webDist string, origins []string, deployments *deployme
 				}
 				return
 			}
-			if r.URL.Path == "/api/deployment-access" || r.URL.Path == "/api/deployments" || strings.HasPrefix(r.URL.Path, "/api/deployments/") {
+			if r.URL.Path == "/api/builder-draft" || r.URL.Path == "/api/deployment-access" || r.URL.Path == "/api/deployments" || strings.HasPrefix(r.URL.Path, "/api/deployments/") {
 				if deployments == nil {
 					jsonError(w, 503, "deployments_disabled", "Deployments are not configured on this server.")
 				} else {
@@ -248,6 +260,10 @@ func main() {
 		}
 		deployments.accessFile = os.Getenv("COOKIST_DEPLOYMENT_ACCESS_FILE")
 		deployments.localAccess = localAccess
+		deployments.publicOrigin = os.Getenv("COOKIST_PUBLIC_ORIGIN")
+		if deployments.publicOrigin != "" && !validFormOrigin(deployments.publicOrigin) {
+			log.Fatal("COOKIST_PUBLIC_ORIGIN must be an HTTPS origin without a path for lead forms")
+		}
 		if _, err := loadAccessPolicy(deployments.accessFile); err != nil {
 			log.Fatalf("deployment access configuration is invalid: %v", err)
 		}

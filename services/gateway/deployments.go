@@ -23,17 +23,26 @@ import (
 )
 
 type deploymentRequest struct {
-	Name         string              `json:"name"`
-	Region       string              `json:"region"`
-	Template     string              `json:"template"`
-	Style        string              `json:"style"`
-	BusinessName string              `json:"businessName"`
-	ListTitle    string              `json:"listTitle"`
-	Items        string              `json:"items"`
-	Products     []deploymentProduct `json:"products,omitempty"`
-	Blocks       []pageBlock         `json:"blocks,omitempty"`
+	Name              string                `json:"name"`
+	Region            string                `json:"region"`
+	Template          string                `json:"template"`
+	Style             string                `json:"style"`
+	BusinessName      string                `json:"businessName"`
+	ListTitle         string                `json:"listTitle"`
+	Items             string                `json:"items"`
+	Products          []deploymentProduct   `json:"products,omitempty"`
+	Blocks            []pageBlock           `json:"blocks"`
+	FormOrigin        string                `json:"-"`
+	DraftProducts     []builderProductDraft `json:"draftProducts,omitempty"`
+	DraftDeploymentID string                `json:"draftDeploymentId,omitempty"`
 }
 
+type builderProductDraft struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Price       string `json:"price"`
+	PaymentLink string `json:"paymentLink"`
+}
 type deploymentProduct struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
@@ -42,16 +51,18 @@ type deploymentProduct struct {
 }
 
 type deployment struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Region    string `json:"region"`
-	Style     string `json:"style,omitempty"`
-	Status    string `json:"status"`
-	URL       string `json:"url,omitempty"`
-	CreatedAt string `json:"createdAt"`
-	TenantID  string `json:"tenantId,omitempty"`
-	CreatedBy string `json:"createdBy,omitempty"`
-	CanDelete bool   `json:"canDelete"`
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	Region          string `json:"region"`
+	Style           string `json:"style,omitempty"`
+	Status          string `json:"status"`
+	URL             string `json:"url,omitempty"`
+	CreatedAt       string `json:"createdAt"`
+	TenantID        string `json:"tenantId,omitempty"`
+	CreatedBy       string `json:"createdBy,omitempty"`
+	CanDelete       bool   `json:"canDelete"`
+	CanEdit         bool   `json:"canEdit,omitempty"`
+	LastUpdateError string `json:"lastUpdateError,omitempty"`
 }
 
 const maxTestDeployments = 4
@@ -62,6 +73,8 @@ type deploymentWorker struct {
 	localAccess                              bool
 	selfServiceBilling                       bool
 	billing                                  *stripeBilling
+	publicOrigin                             string
+	formRates                                map[string]submissionRate
 	client                                   *http.Client
 	mu                                       sync.Mutex
 	execute                                  func(context.Context, string, io.Writer, ...string) ([]byte, error)
@@ -102,7 +115,7 @@ func newDeploymentWorker(coreURL, owner, root, terraform, account string) (*depl
 		cmd := exec.CommandContext(ctx, w.terraform, args...)
 		cmd.Dir, cmd.Stderr = dir, logFile
 		cmd.Env = append(os.Environ(), "TF_IN_AUTOMATION=1", "TF_INPUT=0")
-		if args[0] == "output" {
+		if args[0] == "output" || args[0] == "show" {
 			return cmd.Output()
 		}
 		cmd.Stdout = logFile
@@ -176,6 +189,9 @@ func (w *deploymentWorker) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(rw).Encode(access)
 		return
 	}
+	if w.builderDesignRoute(rw, r, access) || w.submissionsRoute(rw, r, access) {
+		return
+	}
 	action := "list"
 	if r.Method == http.MethodPost {
 		action = "create"
@@ -217,6 +233,9 @@ func (w *deploymentWorker) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 }
 
 func validateDeployment(req deploymentRequest) error {
+	if len(req.DraftProducts) != 0 || req.DraftDeploymentID != "" {
+		return errors.New("Draft-only product fields cannot be published.")
+	}
 	switch req.Style {
 	case "", "classic", "modern", "warm", "bold":
 	default:
@@ -270,6 +289,11 @@ func (w *deploymentWorker) create(rw http.ResponseWriter, r *http.Request, acces
 	}
 	if err := validateDeployment(request); err != nil {
 		jsonError(rw, 400, "invalid_request", err.Error())
+		return
+	}
+	request.FormOrigin = w.publicOrigin
+	if hasLeadForm(request.Blocks) && !validFormOrigin(request.FormOrigin) {
+		jsonError(rw, 503, "forms_unavailable", "Lead forms require a configured HTTPS public origin.")
 		return
 	}
 	w.mu.Lock()
@@ -353,6 +377,9 @@ func (w *deploymentWorker) create(rw http.ResponseWriter, r *http.Request, acces
 	staging := filepath.Join(w.root, "."+d.ID+".pending")
 	if err = os.Mkdir(staging, 0700); err == nil {
 		err = writeTerraformConfig(staging, request, w.account, d.ID)
+		if err == nil && request.Template == "builder" {
+			err = saveBuilderDesign(staging, request)
+		}
 		if err == nil {
 			err = saveDeployment(staging, d)
 		}
@@ -720,6 +747,13 @@ func (w *deploymentWorker) list(rw http.ResponseWriter, access deploymentAccess)
 		}
 		if access.Role == "platform_owner" || d.TenantID == access.TenantID {
 			d.CanDelete = access.CanDelete
+			_, designErr := os.Stat(filepath.Join(w.root, d.ID, "design.json"))
+			if designErr != nil && !errors.Is(designErr, os.ErrNotExist) {
+				log.Printf("saved design lookup failed: %v", designErr)
+				jsonError(rw, 500, "storage_error", "Unable to inspect saved site designs.")
+				return
+			}
+			d.CanEdit = access.CanCreate && d.Status == "ready" && designErr == nil
 			if access.PaymentRequired {
 				d.URL = ""
 			}
@@ -794,7 +828,10 @@ func terraformVariables(req deploymentRequest, account, id string) ([]byte, erro
 		content = "<main><h1>" + title + "</h1>" + catalog + "</main>"
 	}
 	if req.Template == "builder" {
-		content = renderPageBlocks(req.Blocks, catalog)
+		if hasLeadForm(req.Blocks) && !validFormOrigin(req.FormOrigin) {
+			return nil, errors.New("Lead forms require a configured HTTPS public origin.")
+		}
+		content = renderPageBlocksWithForms(req.Blocks, catalog, strings.TrimRight(req.FormOrigin, "/")+"/forms/"+id)
 	}
 	css := `body{font-family:system-ui,sans-serif;max-width:48rem;margin:4rem auto;padding:0 1.5rem;color:#262a28}li{margin:.75rem 0}`
 	body := "<body>"

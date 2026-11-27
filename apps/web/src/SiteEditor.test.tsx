@@ -111,3 +111,28 @@ it('supports side insertion and pairing through keyboard-accessible controls', (
   expect(canvas.querySelectorAll('.page-row')).toHaveLength(2);
   expect(canvas.querySelectorAll('.page-row-pair')).toHaveLength(1);
 });
+
+it('inserts a startup section atomically and undoes it without removing prior elements', () => {
+  render(<Editor />);
+  fireEvent.click(screen.getByRole('button', { name: 'Add Text' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Add Hero section' }));
+  const canvas = screen.getByRole('region', { name: 'Page canvas' });
+  expect(canvas.querySelectorAll('.page-block').length).toBeGreaterThan(1);
+  fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
+  expect(canvas.querySelectorAll('.page-block')).toHaveLength(1);
+  expect(within(canvas).getByText('Tell your customers what makes you different.')).toBeInTheDocument();
+});
+
+it('previews contact and waitlist forms without nesting or submitting a live form', () => {
+  render(<Editor />);
+  fireEvent.click(screen.getByRole('button', { name: 'Add Contact form' }));
+  fireEvent.change(screen.getByLabelText('Element text'), { target: { value: 'Request a demo' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Add Waitlist form' }));
+  const canvas = screen.getByRole('region', { name: 'Page canvas' });
+  expect(canvas.querySelectorAll('.lead-form')).toHaveLength(2);
+  expect(canvas.querySelector('form')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Preview page' }));
+  expect(within(canvas).getByText('Request a demo')).toBeInTheDocument();
+  expect(within(canvas).getByRole('button', { name: 'Send message' })).toBeDisabled();
+  expect(within(canvas).getByRole('button', { name: 'Join waitlist' })).toBeDisabled();
+});

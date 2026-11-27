@@ -3,7 +3,7 @@ import type { FormEvent } from 'react';
 import { api, errorMessage } from './api';
 import type { Session } from './types';
 import { SiteEditor } from './SiteEditor';
-import { blockError } from './pageBlocks';
+import { blockError, isPageBlock } from './pageBlocks';
 import type { PageBlock } from './pageBlocks';
 import '../../../services/gateway/site_styles.css';
 
@@ -32,7 +32,27 @@ const siteStyles: { id: SiteStyle; name: string; description: string }[] = [
 function isSiteStyle(value: unknown): value is SiteStyle {
   return siteStyles.some(style => style.id === value);
 }
-type Deployment = { id: string; name: string; region: string; status: 'running' | 'ready' | 'failed' | 'deleting' | 'cleanup_failed'; url?: string; style?: SiteStyle };
+type Deployment = { id: string; name: string; region: string; status: 'running' | 'ready' | 'failed' | 'deleting' | 'cleanup_failed'; url?: string; style?: SiteStyle; canEdit?: boolean; lastUpdateError?: string };
+type BuilderDesign = { name: string; region: string; template: 'builder'; style: SiteStyle; businessName: string; listTitle: string; items: string; blocks: PageBlock[]; products?: StoreProduct[]; draftProducts?: Omit<ProductDraft, 'id'>[]; draftDeploymentId?: string };
+type Lead = { id: string; formId: string; kind: string; name: string; email: string; message: string; createdAt: string };
+function isLead(value: unknown): value is Lead {
+  if (!value || typeof value !== 'object') return false;
+  const lead = value as Record<string, unknown>;
+  return ['id', 'formId', 'kind', 'name', 'email', 'message', 'createdAt'].every(key => typeof lead[key] === 'string');
+}
+function isBuilderDesign(value: unknown): value is BuilderDesign {
+  if (!value || typeof value !== 'object') return false;
+  const design = value as Record<string, unknown>;
+  return ['name', 'region', 'businessName', 'listTitle', 'items'].every(key => typeof design[key] === 'string')
+    && design.template === 'builder' && isSiteStyle(design.style)
+    && (design.draftDeploymentId === undefined || (typeof design.draftDeploymentId === 'string' && /^[a-f0-9]{32}$/.test(design.draftDeploymentId)))
+    && Array.isArray(design.blocks) && design.blocks.length <= 40 && design.blocks.every(isPageBlock)
+    && (design.products === undefined || (Array.isArray(design.products) && design.products.every(product =>
+      product && typeof product === 'object' && typeof product.name === 'string' && typeof product.description === 'string'
+      && typeof product.priceCents === 'number' && Number.isInteger(product.priceCents) && typeof product.paymentLink === 'string')))
+    && (design.draftProducts === undefined || (Array.isArray(design.draftProducts) && design.draftProducts.every(product =>
+      product && typeof product === 'object' && ['name', 'description', 'price', 'paymentLink'].every(key => typeof product[key] === 'string'))));
+}
 type DeploymentAccess = { role: string; subscribed: boolean; paymentRequired: boolean; canList: boolean; canCreate: boolean; canDelete: boolean; canCheckout?: boolean; canManageBilling?: boolean };
 
 function isDeploymentAccess(value: unknown): value is DeploymentAccess {
@@ -53,6 +73,8 @@ function isDeployment(value: unknown): value is Deployment {
   return typeof d.id === 'string' && typeof d.name === 'string' && typeof d.region === 'string'
     && (d.status === 'running' || d.status === 'ready' || d.status === 'failed' || d.status === 'deleting' || d.status === 'cleanup_failed')
     && (d.style === undefined || isSiteStyle(d.style))
+    && (d.canEdit === undefined || typeof d.canEdit === 'boolean')
+    && (d.lastUpdateError === undefined || typeof d.lastUpdateError === 'string')
     && (d.url === undefined || (typeof d.url === 'string' && /^https:\/\/[a-z0-9-]+\.cloudfront\.net$/.test(d.url)));
 }
 
@@ -106,6 +128,10 @@ export function App({ authenticatedSession, onSignOut, authError }: {
   const [items, setItems] = useState('');
   const [products, setProducts] = useState<ProductDraft[]>([newProduct(1)]);
   const [blocks, setBlocks] = useState<PageBlock[]>([]);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draftBusy, setDraftBusy] = useState(false);
+  const [editorRevision, setEditorRevision] = useState(0);
+  const [inbox, setInbox] = useState<{ deployment: Deployment; leads: Lead[] } | null>(null);
   const nextProductId = useRef(2);
   const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
   const [deployments, setDeployments] = useState<Deployment[]>([]);
@@ -141,6 +167,16 @@ export function App({ authenticatedSession, onSignOut, authError }: {
     setBillingLink(null);
     setProducts([newProduct(1)]);
     setBlocks([]);
+    setEditingId(null);
+    setInbox(null);
+    setDraftBusy(false);
+    setName('');
+    setBusinessName('');
+    setListTitle('Services');
+    setItems('');
+    setTemplate('blank');
+    setSiteStyle('classic');
+    setRegion('us-west-2');
     if (!authenticatedSession) return;
     const session = authenticatedSession;
     const controller = new AbortController();
@@ -222,8 +258,8 @@ export function App({ authenticatedSession, onSignOut, authError }: {
     setMessage(null);
     const version = sessionVersion.current;
     try {
-      const result = await api<unknown>('/api/deployments', authenticatedSession, {
-        method: 'POST', body: { name, region, template, style: siteStyle, businessName, listTitle, items,
+      const result = await api<unknown>(editingId ? `/api/deployments/${editingId}/design` : '/api/deployments', authenticatedSession, {
+        method: editingId ? 'PATCH' : 'POST', body: { name, region, template, style: siteStyle, businessName, listTitle, items,
           ...(usesProducts ? { products: submittedProducts } : {}),
           ...(template === 'builder' ? { blocks } : {}) },
       });
@@ -232,12 +268,120 @@ export function App({ authenticatedSession, onSignOut, authError }: {
       requestVersion.current++;
       setDeployments(previous => [result, ...previous.filter(item => item.id !== result.id)]);
       setCreating(false);
+      setEditingId(null);
       setLoadError('');
-      setMessage({ text: 'Deployment started. It may take several minutes.', error: false });
+      setMessage({ text: editingId ? 'Site update started. The existing URL and infrastructure are retained.' : 'Deployment started. It may take several minutes.', error: false });
     } catch (error) {
       if (version === sessionVersion.current) setMessage({ text: `Could not confirm deployment: ${errorMessage(error)} Check the deployment list before trying again.`, error: true });
     } finally {
       if (version === sessionVersion.current) setSubmitting(false);
+    }
+  }
+
+  function loadDesign(design: BuilderDesign) {
+    if (!awsRegions.some(([code]) => code === design.region)) throw new Error('The saved design has an unsupported region.');
+    setName(design.name);
+    setRegion(design.region);
+    setTemplate('builder');
+    setSiteStyle(design.style);
+    setBusinessName(design.businessName);
+    setListTitle(design.listTitle);
+    setItems(design.items);
+    setBlocks(design.blocks);
+    const savedProducts = design.draftProducts ?? design.products?.map(product => ({
+      name: product.name, description: product.description, price: (product.priceCents / 100).toFixed(2), paymentLink: product.paymentLink,
+    })) ?? [];
+    setProducts(savedProducts.length ? savedProducts.map((product, index) => ({ ...product, id: index + 1 })) : [newProduct(1)]);
+    nextProductId.current = Math.max(2, savedProducts.length + 1);
+    setCreating(true);
+    setEditorRevision(value => value + 1);
+  }
+
+  async function draftAction(action: 'save' | 'load' | 'delete') {
+    if (!authenticatedSession || draftBusy || !currentAccess?.canCreate) return;
+    const version = sessionVersion.current;
+    setDraftBusy(true);
+    setMessage(null);
+    try {
+      const result = await api<unknown>('/api/builder-draft', authenticatedSession, {
+        method: action === 'save' ? 'PUT' : action === 'delete' ? 'DELETE' : 'GET',
+        ...(action === 'save' ? { body: { name, region, template: 'builder', style: siteStyle, businessName, listTitle, items, blocks,
+          ...(editingId ? { draftDeploymentId: editingId } : {}),
+          draftProducts: products.map(({ name, description, price, paymentLink }) => ({ name, description, price, paymentLink })) } } : {}),
+      });
+      if (version !== sessionVersion.current) return;
+      if (action === 'save' && (!result || typeof result !== 'object' || !('draft' in result) || !isBuilderDesign(result.draft))) {
+        throw new Error('The server did not confirm a valid saved draft.');
+      }
+      if (action === 'delete' && (!result || typeof result !== 'object' || !('draft' in result) || result.draft !== null)) {
+        throw new Error('The server did not confirm draft deletion.');
+      }
+      if (action === 'load') {
+        if (!result || typeof result !== 'object' || !('draft' in result)) throw new Error('The server returned an invalid draft.');
+        if (result.draft === null) throw new Error('You do not have a saved draft yet.');
+        const draft = result.draft;
+        if (!isBuilderDesign(draft)) throw new Error('The server returned an invalid draft.');
+        if (draft.draftDeploymentId && !visibleDeployments.some(deployment => deployment.id === draft.draftDeploymentId && deployment.canEdit)) {
+          throw new Error('The saved draft targets a site that is unavailable for editing. Check its deployment status.');
+        }
+        loadDesign(draft);
+        setEditingId(draft.draftDeploymentId ?? null);
+      }
+      setMessage({ text: action === 'save' ? 'Draft saved to your account. It does not change the published site.' : action === 'load' ? 'Saved draft loaded. Review it before publishing.' : 'Saved draft deleted.', error: false });
+    } catch (error) {
+      if (version === sessionVersion.current) setMessage({ text: errorMessage(error), error: true });
+    } finally {
+      if (version === sessionVersion.current) setDraftBusy(false);
+    }
+  }
+
+  async function editSite(target: Deployment) {
+    if (!authenticatedSession || draftBusy || !currentAccess?.canCreate) return;
+    const version = sessionVersion.current;
+    setDraftBusy(true);
+    setMessage(null);
+    try {
+      const design = await api<unknown>(`/api/deployments/${target.id}/design`, authenticatedSession);
+      if (version !== sessionVersion.current) return;
+      if (!isBuilderDesign(design)) throw new Error('The server returned an invalid saved design.');
+      loadDesign(design);
+      setEditingId(target.id);
+    } catch (error) {
+      if (version === sessionVersion.current) setMessage({ text: errorMessage(error), error: true });
+    } finally {
+      if (version === sessionVersion.current) setDraftBusy(false);
+    }
+  }
+
+  async function loadInbox(target: Deployment) {
+    if (!authenticatedSession || draftBusy || !currentAccess?.canDelete) return;
+    const version = sessionVersion.current;
+    setDraftBusy(true);
+    setMessage(null);
+    try {
+      const leads = await api<unknown>(`/api/deployments/${target.id}/submissions`, authenticatedSession);
+      if (version !== sessionVersion.current) return;
+      if (!Array.isArray(leads) || !leads.every(isLead)) throw new Error('The server returned an invalid inbox.');
+      setInbox({ deployment: target, leads });
+    } catch (error) {
+      if (version === sessionVersion.current) setMessage({ text: errorMessage(error), error: true });
+    } finally {
+      if (version === sessionVersion.current) setDraftBusy(false);
+    }
+  }
+
+  async function deleteLead(id: string) {
+    if (!authenticatedSession || !inbox || draftBusy || !currentAccess?.canDelete) return;
+    const version = sessionVersion.current;
+    setDraftBusy(true);
+    try {
+      const result = await api<unknown>(`/api/deployments/${inbox.deployment.id}/submissions/${id}`, authenticatedSession, { method: 'DELETE' });
+      if (!result || typeof result !== 'object' || !('deleted' in result) || result.deleted !== true) throw new Error('The server did not confirm submission deletion.');
+      if (version === sessionVersion.current) setInbox(current => current ? { ...current, leads: current.leads.filter(lead => lead.id !== id) } : null);
+    } catch (error) {
+      if (version === sessionVersion.current) setMessage({ text: errorMessage(error), error: true });
+    } finally {
+      if (version === sessionVersion.current) setDraftBusy(false);
     }
   }
 
@@ -319,7 +463,7 @@ export function App({ authenticatedSession, onSignOut, authError }: {
       <div className="section-heading">
         <div><h2>Deployments</h2><p>Deploy a site to your AWS account.</p></div>
         <button ref={newDeploymentButton} type="button" className="primary" disabled={!!authenticatedSession && !currentAccess?.canCreate}
-          onClick={() => { setCreating(true); setMessage(null); }}>
+          onClick={() => { setCreating(true); setEditingId(null); setMessage(null); }}>
           <span aria-hidden="true">+</span> New deployment
         </button>
       </div>
@@ -347,11 +491,15 @@ export function App({ authenticatedSession, onSignOut, authError }: {
         {!billingLink.portal && ' Access unlocks only after Stripe confirms payment, not when you return from checkout.'}
       </p>}
       {currentAccess?.role === 'viewer' && <p className="deployment-notice">Your role provides read-only deployment access.</p>}
+      {currentAccess?.canCreate && !creating && <button type="button" className="secondary" disabled={draftBusy} onClick={() => void draftAction('load')}>Load saved builder draft</button>}
       {loadError && <p role="alert">{loadError}</p>}
       {visibleDeployments.length > 0 && <ul className="deployment-list">
         {visibleDeployments.map(deployment => <li key={deployment.id}>
           <strong>{deployment.name}</strong> <span>{deployment.region} &mdash; {deployment.status}</span>
           {deployment.style && <small className="site-style-label">Style: {deployment.style}</small>}
+          {deployment.lastUpdateError && <small role="alert">{deployment.lastUpdateError}</small>}
+          {deployment.canEdit && currentAccess?.canCreate && <button type="button" disabled={draftBusy || submitting} onClick={() => void editSite(deployment)}>Edit {deployment.name}</button>}
+          {currentAccess?.canDelete && <button type="button" disabled={draftBusy} onClick={() => void loadInbox(deployment)}>Submissions for {deployment.name}</button>}
           {deployment.url && currentAccess && !currentAccess.paymentRequired &&
             <a href={deployment.url} target="_blank" rel="noreferrer">Open site</a>}
           {deployment.status === 'failed' && <small>Deployment failed. An operator must inspect the private Terraform log and state.</small>}
@@ -365,9 +513,18 @@ export function App({ authenticatedSession, onSignOut, authError }: {
             </button>}
         </li>)}
       </ul>}
+      {inbox && currentAccess?.canDelete && <section className="builder-inbox" aria-label={`Submissions for ${inbox.deployment.name}`}>
+        <h3>Submissions for {inbox.deployment.name}</h3>
+        <p>Private to your organization. Delete entries when no longer needed. This inbox does not send email automatically.</p>
+        <button type="button" className="secondary" onClick={() => setInbox(null)}>Close inbox</button>
+        {!inbox.leads.length ? <p>No submissions yet.</p> : <ul>{inbox.leads.map(lead => <li key={lead.id}>
+          <strong>{lead.name}</strong> — {lead.kind}<p>{lead.email}</p><p>{lead.message}</p><small>{lead.createdAt}</small>
+          <button type="button" disabled={draftBusy} onClick={() => void deleteLead(lead.id)}>Delete submission from {lead.name}</button>
+        </li>)}</ul>}
+      </section>}
       {deleteTarget && currentAccess?.canDelete && <section role="region" aria-label={`Confirm deletion of ${deleteTarget.name}`}>
         <h3>Delete {deleteTarget.name}?</h3>
-        <p>This permanently deletes this deployment's AWS resources and site content. After successful cleanup,
+        <p>This permanently deletes this deployment's AWS resources, site content, saved design, and submissions. After successful cleanup,
           its saved state is removed and its deployment slot is freed. Previously incurred AWS charges are not refunded.</p>
         <button type="button" className="primary" disabled={!!deleting} onClick={() => void deleteDeployment(deleteTarget)}>
           {deleting ? 'Starting cleanup...' : 'Confirm delete'}
@@ -380,15 +537,15 @@ export function App({ authenticatedSession, onSignOut, authError }: {
       </div>}
       {!creating && message && <p role={message.error ? 'alert' : 'status'}>{message.text}</p>}
       {creating && (!authenticatedSession || currentAccess?.canCreate) && <form className="deployment-form" onSubmit={event => void deploy(event)}>
-        <h3>Create a Terraform deployment</h3>
+        <h3>{editingId ? 'Edit existing site' : 'Create a Terraform deployment'}</h3>
         <label>Deployment name<input required maxLength={80} value={name} onChange={event => setName(event.target.value)} /></label>
         <label>AWS region
-          <select required value={region} onChange={event => setRegion(event.target.value)}>
+          <select required value={region} disabled={!!editingId} onChange={event => setRegion(event.target.value)}>
             {awsRegions.map(([code, location]) => <option key={code} value={code}>{location} ({code})</option>)}
           </select>
         </label>
         <p>Some regions must be enabled in your AWS account. CloudFront serves the site globally.</p>
-        <fieldset>
+        <fieldset disabled={!!editingId}>
           <legend>Choose a template</legend>
           <label className="template-choice">
             <input type="radio" name="template" checked={template === 'blank'} onChange={() => setTemplate('blank')} />
@@ -448,7 +605,13 @@ export function App({ authenticatedSession, onSignOut, authError }: {
             </label>)}
           </div>
         </fieldset>
-        {template === 'builder' ? <SiteEditor blocks={blocks} onChange={setBlocks} style={siteStyle} disabled={submitting} catalog={catalogPreview} /> : <div className="site-preview-block">
+        {template === 'builder' && <div className="builder-draft-actions">
+          <button type="button" className="secondary" disabled={draftBusy || submitting} onClick={() => void draftAction('save')}>Save draft</button>
+          <button type="button" className="secondary" disabled={draftBusy || submitting} onClick={() => void draftAction('load')}>Load draft</button>
+          <button type="button" className="secondary" disabled={draftBusy || submitting} onClick={() => void draftAction('delete')}>Delete saved draft</button>
+          <p>One private draft per account and organization. Saving is explicit; unsaved changes are lost on reload.</p>
+        </div>}
+        {template === 'builder' ? <SiteEditor key={`${editingId ?? 'new-design'}-${editorRevision}`} blocks={blocks} onChange={setBlocks} style={siteStyle} disabled={submitting || draftBusy} catalog={catalogPreview} /> : <div className="site-preview-block">
           <h4>Site preview</h4>
           <div className={`site-preview generated-site site-style-${siteStyle}`} role="region" aria-label="Site preview">
             <div className="site-content">
@@ -469,7 +632,7 @@ export function App({ authenticatedSession, onSignOut, authError }: {
           Anyone with the site URL can access it; it is not Tailscale-private.
           AWS charges may apply until the resources are destroyed. Business listings are static lists; storefronts link to seller-owned Stripe checkout.
           Cookist does not store card details or process storefront orders.</p>
-        <div className="form-actions"><button className="primary" type="submit" disabled={submitting || !authenticatedSession}>{submitting ? 'Starting...' : 'Deploy site'}</button>
+        <div className="form-actions"><button className="primary" type="submit" disabled={submitting || draftBusy || !authenticatedSession}>{submitting ? 'Starting...' : editingId ? 'Publish changes' : 'Deploy site'}</button>
           <button type="button" className="secondary" disabled={submitting} onClick={() => { setCreating(false); setMessage(null); newDeploymentButton.current?.focus(); }}>Cancel</button></div>
         {message && <p role={message.error ? 'alert' : 'status'}>{message.text}</p>}
       </form>}

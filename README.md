@@ -83,6 +83,50 @@ stock or mark orders paid. Existing blank/business deployments are not converted
 
 ### Designing a page visually
 
+#### Startup tools
+
+- **Save draft / Load draft / Delete saved draft** keep one private design per
+  authenticated account and organization on the worker's persistent volume.
+  Incomplete content and product prices can be saved. Saving is explicit, not
+  autosave, and never changes the published site. A draft of an existing site
+  retains its edit target; it cannot silently become a new deployment.
+- **Startup sections** insert editable Hero, Features, Pricing, Testimonials,
+  and FAQ layouts using standard elements. One Undo removes the whole inserted
+  section. Replace sample copy and supply button destinations before publishing;
+  sections never silently link visitors to an example website.
+- **Edit [site name] / Publish changes** reopen builder sites whose structured
+  design was saved by this release. Region, URL, AWS resources, and ownership are
+  retained. The worker applies only a reviewed saved Terraform plan that updates
+  the existing `aws_s3_object.index` in place; infrastructure drift or replacement
+  is rejected. Planning failures keep the published design and report an error.
+  Uncertain apply/persistence failures retain a recovery lock for an operator.
+  Older sites without a saved structured design cannot be reopened automatically.
+- **Contact form / Waitlist form** collect names, emails, contact messages, and
+  explicit contact consent. Published forms submit natively to the gateway;
+  editing and preview never send submissions. Owners and authorized deployment
+  managers use **Submissions for [site name]** to read or permanently delete
+  entries in the private organization inbox. Forms do not send email, subscribe
+  users to a mailing service, or provide a CRM automatically.
+
+Lead forms require `COOKIST_PUBLIC_ORIGIN` to be the reachable HTTPS portal origin
+(for example, `https://trymachi.com`, with no trailing slash or path). The reverse
+proxy must forward `POST /forms/{deploymentId}/{formId}` to the gateway. This route
+is public only for a published form on a ready site, requires that site's exact
+browser Origin, accepts at most 8 KiB, and validates bounded fields and consent.
+A honeypot rejects obvious bot submissions; each form accepts at most 30 valid
+submissions per minute and each site stores at most 1,000 entries until managers
+delete them. Rate counters are in memory; the inbox capacity persists across
+restarts. These are basic spam controls, not a CAPTCHA or a substitute for an
+edge rate limiter. Display an appropriate privacy policy and delete records when
+no longer needed. Site cleanup also removes its saved design and submissions;
+the separate account draft is retained.
+
+Drafts use `GET`, `PUT`, and `DELETE /api/builder-draft`. Designs use
+`GET` and `PATCH /api/deployments/{id}/design`. Inbox access uses
+`GET /api/deployments/{id}/submissions` and
+`DELETE /api/deployments/{id}/submissions/{submissionId}`. All these API routes
+require authentication and enforce account/organization permissions.
+
 Choose **Visual builder** to open Cookist's Page studio. The left-hand Add elements
 sidebar has square icon tiles with visible labels; it stays within reach while
 scrolling on desktop and becomes a compact tile grid above the page on phones.
@@ -346,10 +390,13 @@ preserved. Funnel is beta and subject to bandwidth limits; monitor Stripe's
 delivery retries. Nginx and Tailscale are enabled services, and the Funnel
 configuration is persistent.
 
-The existing worker now runs `cookist-gateway:sidebar-4908fe4317b2`, built from merged
-commit `56d015521ca396b0614ff24596befb2599e50f9f` plus the current web 1.7.1 package
-metadata and validated generated-site favicon, storefront, visual-builder, and
-two-column element and square-icon sidebar source changes. Hosted customers can
+The existing worker now runs `cookist-gateway:startup-4407cc45239e`, with image ID
+`sha256:1ef6a7433920aa4f8e7aef0ec6aeeb83fade8d9672c66c1f89e9d280b3e73c1f`.
+It uses the archived source at commit
+`56d015521ca396b0614ff24596befb2599e50f9f` plus the current web 1.7.2 package
+metadata and validated generated-site favicon, storefront, visual-builder,
+two-column elements, square-icon sidebar, expanded canvas, and startup tools.
+Hosted customers can
 choose Classic, Modern, Warm, or Bold styles with live previews, including on
 mobile. Billing uses the Glaucous Zipline
 **test sandbox**, not live payments. Its enabled snapshot destination listens
@@ -361,7 +408,7 @@ preview colors, mobile layout, API style validation and selected-style submissio
 were verified without creating any AWS sites.
 The deployed visual editor was verified using isolated API fixtures: actual
 palette and reorder drags, editable settings, undo/redo, duplicate/delete,
-all seven element types, left/right placement, moving existing elements beside
+all original seven element types, left/right placement, moving existing elements beside
 others, the two-column limit, phone placement controls, phone layout, preview,
 and exact deployment payload. Generated builder HTML was separately verified
 locally in all four styles, including equal-width desktop columns, stacking at
@@ -371,6 +418,18 @@ The deployed icon sidebar was verified at 1440, 900, 641, 640, 390, and 320px:
 square labeled tiles, desktop/tablet sidebar placement, phone grid, visible
 keyboard focus, sticky scrolling, actual tile dragging, and no horizontal
 overflow. The existing builder and paired-element browser checks also passed.
+The startup release passed 41 frontend tests, the full Go test suite and vet,
+and a production frontend build. Hosted browser checks used isolated API fixtures
+to verify section insertion, drafts across reload, fresh editor history, existing
+site update payloads, private inbox controls, contact/waitlist previews, and mobile
+layout; the original builder, pairs, and sidebar regressions also passed.
+Actual generated contact and waitlist forms were separately submitted cross-origin
+to a local TLS gateway, with private persistence and authenticated inbox retrieval.
+Hosted `/forms/` POST ingress returned the gateway's expected unknown-form 404;
+private draft/inbox requests without authentication returned 401. These checks
+did not provision sites or create production submissions. Forms collect entries
+in the private inbox, not an email service or CRM; older sites without a saved
+structured design cannot automatically reopen in the editor.
 Storefront product editing and submission were exercised against the deployed
 frontend with isolated API fixtures. Actual Go-generated storefront pages were
 verified in all four styles at 390px width, and a real one-time Stripe sandbox
@@ -389,7 +448,11 @@ The flow was verified with a fresh account while the policy had no memberships.
 Other installations remain administrator-approved unless they explicitly enable
 the setting described above.
 
-The previous paired-builder gateway is retained as
+The previous expanded-canvas gateway is retained as
+`cookist-gateway-before-startup-4407cc45239e`, with environment and startup backups
+ending in `.before-startup-4407cc45239e`. The previous sidebar gateway is retained as
+`cookist-gateway-before-canvas-3d20d8b7404f`, with environment and startup backups
+ending in `.before-canvas-3d20d8b7404f`. The previous paired-builder gateway is retained as
 `cookist-gateway-before-sidebar-4908fe4317b2`, with environment and startup backups
 ending in `.before-sidebar-4908fe4317b2`. The previous stacked-builder gateway is retained as
 `cookist-gateway-before-paired-a27f19cc3554`, with environment and startup backups

@@ -140,6 +140,12 @@
 .generated-site .page-block-divider hr { border: 0; border-top: 1px solid var(--site-border); margin: 0; }
 .generated-site .page-size-small .page-spacer { height: 16px; }
 .generated-site .page-size-medium .page-spacer { height: 40px; }
+.generated-site .lead-form { display: grid; gap: 16px; padding: 20px; border: 1px solid var(--site-border); border-radius: var(--site-radius); background: var(--site-surface); }
+.generated-site .lead-form label { display: grid; gap: 8px; }
+.generated-site .lead-form input:not([type="checkbox"]), .generated-site .lead-form textarea { width: 100%; min-width: 0; padding: 10px; border: 1px solid var(--site-border); border-radius: 6px; font: inherit; color: var(--site-text); background: var(--site-background); }
+.generated-site .lead-form .lead-consent { display: flex; align-items: flex-start; gap: 8px; font-size: .875rem; }
+.generated-site .lead-form .lead-honeypot { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }
+.generated-site .lead-form button { border: 0; font: inherit; cursor: pointer; }
 .generated-site .page-size-large .page-spacer { height: 80px; }
 @media (max-width: 600px) {
   .generated-site .page-row-pair { grid-template-columns: minmax(0, 1fr); }
