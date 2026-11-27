@@ -12,6 +12,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,13 +23,22 @@ import (
 )
 
 type deploymentRequest struct {
-	Name         string `json:"name"`
-	Region       string `json:"region"`
-	Template     string `json:"template"`
-	Style        string `json:"style"`
-	BusinessName string `json:"businessName"`
-	ListTitle    string `json:"listTitle"`
-	Items        string `json:"items"`
+	Name         string              `json:"name"`
+	Region       string              `json:"region"`
+	Template     string              `json:"template"`
+	Style        string              `json:"style"`
+	BusinessName string              `json:"businessName"`
+	ListTitle    string              `json:"listTitle"`
+	Items        string              `json:"items"`
+	Products     []deploymentProduct `json:"products,omitempty"`
+	Blocks       []pageBlock         `json:"blocks,omitempty"`
+}
+
+type deploymentProduct struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	PriceCents  int64  `json:"priceCents"`
+	PaymentLink string `json:"paymentLink"`
 }
 
 type deployment struct {
@@ -61,12 +71,16 @@ var regionPattern = regexp.MustCompile(`^[a-z]{2}(?:-[a-z]+)+-[0-9]+$`)
 var accountPattern = regexp.MustCompile(`^[0-9]{12}$`)
 var idPattern = regexp.MustCompile(`^[a-f0-9]{32}$`)
 var websiteURLPattern = regexp.MustCompile(`^https://[a-z0-9-]+\.cloudfront\.net$`)
+var paymentLinkPattern = regexp.MustCompile(`^https://buy\.stripe\.com/(?:test_)?[A-Za-z0-9]+$`)
 
 //go:embed terraform/site/*.tf terraform/site/.terraform.lock.hcl
 var siteTerraform embed.FS
 
 //go:embed site_styles.css
 var siteStylesCSS string
+
+var siteFaviconURL = "data:image/svg+xml," + url.PathEscape(
+	`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#262a28"/><path d="M9 10h14M9 16h14M9 22h9" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/></svg>`)
 
 func newDeploymentWorker(coreURL, owner, root, terraform, account string) (*deploymentWorker, error) {
 	if owner == "" || root == "" || terraform == "" || !accountPattern.MatchString(account) {
@@ -209,17 +223,42 @@ func validateDeployment(req deploymentRequest) error {
 		return errors.New("Select a supported site style.")
 	}
 	if strings.TrimSpace(req.Name) == "" || len(req.Name) > 320 || !regionPattern.MatchString(req.Region) ||
-		(req.Template != "blank" && req.Template != "business") || len(req.BusinessName) > 320 ||
+		(req.Template != "blank" && req.Template != "business" && req.Template != "storefront" && req.Template != "builder") || len(req.BusinessName) > 320 ||
 		len(req.ListTitle) > 320 || len(req.Items) > 8000 ||
 		(req.Template == "business" && (strings.TrimSpace(req.BusinessName) == "" || strings.TrimSpace(req.ListTitle) == "")) {
 		return errors.New("Complete the required fields and select a valid template and region.")
+	}
+	if req.Template == "builder" {
+		if err := validatePageBlocks(req.Blocks); err != nil {
+			return err
+		}
+	} else if len(req.Blocks) > 0 {
+		return errors.New("Page elements require the visual builder template.")
+	}
+	usesProducts := req.Template == "storefront" || (req.Template == "builder" && hasProductCatalog(req.Blocks))
+	if !usesProducts && len(req.Products) != 0 {
+		return errors.New("Products require the storefront template.")
+	}
+	if usesProducts {
+		if strings.TrimSpace(req.BusinessName) == "" || len(req.Products) < 1 || len(req.Products) > 20 {
+			return errors.New("Enter a store name and between 1 and 20 products.")
+		}
+		for i, product := range req.Products {
+			if strings.TrimSpace(product.Name) == "" || len(product.Name) > 320 ||
+				len(product.Description) > 2000 || product.PriceCents < 1 || product.PriceCents > 99999999 {
+				return fmt.Errorf("Product %d requires a name and a USD price between $0.01 and $999999.99.", i+1)
+			}
+			if len(product.PaymentLink) > 200 || !paymentLinkPattern.MatchString(product.PaymentLink) {
+				return fmt.Errorf("Product %d requires a plain https://buy.stripe.com/ Stripe Payment Link without query parameters.", i+1)
+			}
+		}
 	}
 	return nil
 }
 
 func (w *deploymentWorker) create(rw http.ResponseWriter, r *http.Request, access deploymentAccess) {
 	var request deploymentRequest
-	decoder := json.NewDecoder(http.MaxBytesReader(rw, r.Body, 16384))
+	decoder := json.NewDecoder(http.MaxBytesReader(rw, r.Body, 524288))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil {
 		jsonError(rw, 400, "invalid_request", "Invalid deployment request.")
@@ -735,13 +774,39 @@ func terraformVariables(req deploymentRequest, account, id string) ([]byte, erro
 		}
 		content = "<main><h1>" + title + "</h1><h2>" + escape(req.ListTitle) + "</h2><ul>" + items.String() + "</ul></main>"
 	}
+	catalog := ""
+	if req.Template == "storefront" || (req.Template == "builder" && hasProductCatalog(req.Blocks)) {
+		var products strings.Builder
+		for _, product := range req.Products {
+			fmt.Fprintf(&products, `<li><h3>%s</h3><p class="store-description">%s</p><p class="store-price">$%d.%02d USD</p>`,
+				escape(product.Name), escape(product.Description), product.PriceCents/100, product.PriceCents%100)
+			if strings.HasPrefix(product.PaymentLink, "https://buy.stripe.com/test_") {
+				products.WriteString(`<p class="store-test-notice">Test checkout - no real charge</p>`)
+			}
+			fmt.Fprintf(&products, `<a class="store-buy" href="%s" rel="noreferrer" aria-label="Buy %s">Buy now</a></li>`,
+				escape(product.PaymentLink), escape(product.Name))
+		}
+		catalog = `<p class="store-checkout-note">Secure checkout by Stripe. Final price, availability, shipping and taxes are confirmed at checkout.</p><ul class="store-products">` +
+			products.String() + "</ul>"
+	}
+	if req.Template == "storefront" {
+		title = escape(req.BusinessName)
+		content = "<main><h1>" + title + "</h1>" + catalog + "</main>"
+	}
+	if req.Template == "builder" {
+		content = renderPageBlocks(req.Blocks, catalog)
+	}
 	css := `body{font-family:system-ui,sans-serif;max-width:48rem;margin:4rem auto;padding:0 1.5rem;color:#262a28}li{margin:.75rem 0}`
 	body := "<body>"
-	if req.Style != "" && req.Style != "classic" {
+	if (req.Style != "" && req.Style != "classic") || req.Template == "storefront" || req.Template == "builder" {
 		css = siteStylesCSS
-		body = `<body class="generated-site site-style-` + req.Style + `">`
+		style := req.Style
+		if style == "" {
+			style = "classic"
+		}
+		body = `<body class="generated-site site-style-` + style + `">`
 	}
-	page := `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>` + title +
+	page := `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="icon" type="image/svg+xml" href="` + siteFaviconURL + `"><title>` + title +
 		`</title><style>` + css + `</style></head>` + body + content + `</body></html>`
 	return json.MarshalIndent(map[string]string{
 		"account_id": account, "deployment_id": id, "region": req.Region, "page_html": page,

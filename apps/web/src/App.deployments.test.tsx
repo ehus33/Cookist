@@ -265,3 +265,89 @@ it('uses server-authorized local access without a payment notice', async () => {
   await waitFor(() => expect(screen.getByRole('button', { name: 'New deployment' })).toBeEnabled());
   expect(screen.queryByRole('heading', { name: 'Paid access required' })).not.toBeInTheDocument();
 });
+
+  it('previews and submits seller products with exact integer USD prices', async () => {
+    const api = vi.spyOn(apiModule, 'api').mockImplementation(async (path, _session, options) => {
+      if (path === '/api/deployment-access') return ownerAccess;
+      if (options?.method === 'POST') return { id: 'store', name: 'Shop', region: 'us-west-2', status: 'running', style: 'bold' };
+      return [];
+    });
+    render(<App authenticatedSession={session} />);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'New deployment' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'New deployment' }));
+    fireEvent.click(screen.getByRole('radio', { name: /Storefront/ }));
+    fireEvent.change(screen.getByLabelText('Deployment name'), { target: { value: 'Shop' } });
+    fireEvent.change(screen.getByLabelText('Store name'), { target: { value: 'My store' } });
+    fireEvent.change(screen.getByLabelText('Product 1 name'), { target: { value: '<img src=x>' } });
+    fireEvent.change(screen.getByLabelText('Product 1 description'), { target: { value: 'Oil & filter' } });
+    fireEvent.change(screen.getByLabelText('Product 1 price (USD)'), { target: { value: '27.05' } });
+    fireEvent.change(screen.getByLabelText('Product 1 Stripe Payment Link'), { target: { value: 'https://buy.stripe.com/test_abc123' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add product' }));
+    fireEvent.change(screen.getByLabelText('Product 2 name'), { target: { value: 'Service' } });
+    fireEvent.change(screen.getByLabelText('Product 2 price (USD)'), { target: { value: '0.01' } });
+    fireEvent.change(screen.getByLabelText('Product 2 Stripe Payment Link'), { target: { value: 'https://buy.stripe.com/abc456' } });
+    fireEvent.click(screen.getByRole('radio', { name: /Bold/ }));
+    const preview = screen.getByRole('region', { name: 'Site preview' });
+    expect(preview).toHaveClass('site-style-bold');
+    expect(within(preview).getByText('$27.05 USD')).toBeInTheDocument();
+    expect(within(preview).getByText('$0.01 USD')).toBeInTheDocument();
+    expect(within(preview).getByText('<img src=x>')).toBeInTheDocument();
+    expect(preview.querySelector('img, a')).toBeNull();
+    for (const button of within(preview).getAllByRole('button', { name: 'Buy now' })) expect(button).toBeDisabled();
+    expect(within(preview).getAllByText('Test checkout - no real charge')).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Deploy site' }));
+    await waitFor(() => expect(api).toHaveBeenCalledWith('/api/deployments', session, expect.objectContaining({
+      method: 'POST', body: expect.objectContaining({
+        template: 'storefront', style: 'bold', businessName: 'My store',
+        products: [
+          { name: '<img src=x>', description: 'Oil & filter', priceCents: 2705, paymentLink: 'https://buy.stripe.com/test_abc123' },
+          { name: 'Service', description: '', priceCents: 1, paymentLink: 'https://buy.stripe.com/abc456' },
+        ],
+      }),
+    })));
+  });
+
+  it('rejects invalid storefront prices and checkout destinations before sending a request', async () => {
+    const api = vi.spyOn(apiModule, 'api').mockImplementation(async path => path === '/api/deployment-access' ? ownerAccess : []);
+    render(<App authenticatedSession={session} />);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'New deployment' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'New deployment' }));
+    fireEvent.click(screen.getByRole('radio', { name: /Storefront/ }));
+    fireEvent.change(screen.getByLabelText('Deployment name'), { target: { value: 'Shop' } });
+    fireEvent.change(screen.getByLabelText('Store name'), { target: { value: 'Shop' } });
+    fireEvent.change(screen.getByLabelText('Product 1 name'), { target: { value: 'Product' } });
+    for (const [price, link] of [
+      ['0', 'https://buy.stripe.com/abc123'], ['19.999', 'https://buy.stripe.com/abc123'],
+      ['1e2', 'https://buy.stripe.com/abc123'], ['19.99', 'https://buy.stripe.com.attacker.example/abc123'],
+      ['19.99', 'https://checkout.stripe.com/c/pay/platformBilling'],
+    ]) {
+      fireEvent.change(screen.getByLabelText('Product 1 price (USD)'), { target: { value: price } });
+      fireEvent.change(screen.getByLabelText('Product 1 Stripe Payment Link'), { target: { value: link } });
+      fireEvent.submit(screen.getByRole('button', { name: 'Deploy site' }).closest('form')!);
+      expect(await screen.findByRole('alert')).toHaveTextContent('Product 1 needs');
+    }
+    expect(api.mock.calls.some(([, , options]) => options?.method === 'POST')).toBe(false);
+  });
+
+  it('removes product drafts and does not send storefront products with a blank template', async () => {
+    const api = vi.spyOn(apiModule, 'api').mockImplementation(async (path, _session, options) => {
+      if (path === '/api/deployment-access') return ownerAccess;
+      if (options?.method === 'POST') return { id: 'blank', name: 'Site', region: 'us-west-2', status: 'running' };
+      return [];
+    });
+    render(<App authenticatedSession={session} />);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'New deployment' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'New deployment' }));
+    fireEvent.click(screen.getByRole('radio', { name: /Storefront/ }));
+    expect(screen.getByRole('button', { name: 'Remove product 1' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Add product' }));
+    fireEvent.change(screen.getByLabelText('Product 2 name'), { target: { value: 'Removed' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Remove product 2' }));
+    expect(within(screen.getByRole('region', { name: 'Site preview' })).queryByText('Removed')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('radio', { name: /Blank slate/ }));
+    fireEvent.change(screen.getByLabelText('Deployment name'), { target: { value: 'Site' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Deploy site' }));
+    await waitFor(() => expect(api).toHaveBeenCalledWith('/api/deployments', session, expect.objectContaining({
+      method: 'POST', body: expect.not.objectContaining({ products: expect.anything() }),
+    })));
+  });
