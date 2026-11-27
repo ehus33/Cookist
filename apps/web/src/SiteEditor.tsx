@@ -4,6 +4,15 @@ import { blockRows, blockTypes, insertBlock, isSafeWebURL, moveBlock, newBlock, 
 import type { BlockType, PageBlock } from './pageBlocks';
 
 const dragFormat = 'application/x-cookist-element';
+const elementIcons: Record<BlockType, ReactNode> = {
+  heading: <path d="M5 5v14M19 5v14M5 12h14M3 5h4M17 5h4M3 19h4M17 19h4" />,
+  text: <path d="M4 5h16M4 10h16M4 15h16M4 20h10" />,
+  image: <><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8" cy="8" r="1.5" /><path d="m3 17 5-5 4 4 4-6 5 7" /></>,
+  button: <><rect x="3" y="4" width="18" height="10" rx="3" /><path d="M7 9h7m0 4 2 8 2-3 3-1-7-4Z" /></>,
+  divider: <><path d="M3 12h18" /><path d="M5 5h14M5 19h14" strokeDasharray="2 3" /></>,
+  spacer: <path d="M4 3h16M4 21h16M12 6v12m-3-9 3-3 3 3m-6 6 3 3 3-3" />,
+  products: <><path d="M5 7h14l2 14H3L5 7Z" /><path d="M8 9V6a4 4 0 0 1 8 0v3" /></>,
+};
 
 export function SiteEditor({ blocks, onChange, style, disabled, catalog }: {
   blocks: PageBlock[];
@@ -116,6 +125,17 @@ export function SiteEditor({ blocks, onChange, style, disabled, catalog }: {
     <div className={`builder-layout${preview ? ' is-preview' : ''}`}>
       {!preview && <aside className="builder-palette" aria-label="Add elements">
         <h5>Add elements</h5>
+        <p className="builder-palette-hint">Drag onto your page or click to add.</p>
+        <div className="builder-palette-grid">
+          {blockTypes.map(item => <button key={item.type} type="button" className="builder-palette-tile" draggable={!disabled}
+            disabled={disabled || blocks.length >= 40 || (item.type === 'products' && blocks.some(block => block.type === 'products'))}
+            onDragStart={event => startDrag(event, { type: item.type })} onDragEnd={() => { drag.current = null; setDropTarget(null); }}
+            onClick={() => add(item.type, blocks.length, canInsertBeside && selected && placement !== 'row' ? { id: selected.id, side: placement } : undefined)} aria-label={`Add ${item.label}`}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"
+              aria-hidden="true" focusable="false">{elementIcons[item.type]}</svg>
+            <span>{item.label}</span>
+          </button>)}
+        </div>
         <label>Add placement<select value={canInsertBeside ? placement : 'row'} disabled={disabled}
           onChange={event => {
             const value = event.target.value;
@@ -125,12 +145,6 @@ export function SiteEditor({ blocks, onChange, style, disabled, catalog }: {
           <option value="left" disabled={!canInsertBeside}>Left of selected</option>
           <option value="right" disabled={!canInsertBeside}>Right of selected</option>
         </select></label>
-        {blockTypes.map(item => <button key={item.type} type="button" className="secondary" draggable={!disabled}
-          disabled={disabled || blocks.length >= 40 || (item.type === 'products' && blocks.some(block => block.type === 'products'))}
-          onDragStart={event => startDrag(event, { type: item.type })} onDragEnd={() => { drag.current = null; setDropTarget(null); }}
-          onClick={() => add(item.type, blocks.length, canInsertBeside && selected && placement !== 'row' ? { id: selected.id, side: placement } : undefined)} aria-label={`Add ${item.label}`}>
-          <span aria-hidden="true">{item.icon}</span> {item.label}
-        </button>)}
       </aside>}
       <div className="builder-stage">
         <div className={`builder-canvas generated-site site-style-${style}${mobile ? ' phone-preview' : ''}`}

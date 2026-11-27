@@ -10,14 +10,14 @@ export type PageBlock = {
   beside?: boolean;
 };
 
-export const blockTypes: { type: BlockType; label: string; icon: string }[] = [
-  { type: 'heading', label: 'Heading', icon: 'H' },
-  { type: 'text', label: 'Text', icon: 'T' },
-  { type: 'image', label: 'Image', icon: '[ ]' },
-  { type: 'button', label: 'Button', icon: 'Go' },
-  { type: 'divider', label: 'Divider', icon: '--' },
-  { type: 'spacer', label: 'Space', icon: '::' },
-  { type: 'products', label: 'Product catalog', icon: '$' },
+export const blockTypes: { type: BlockType; label: string }[] = [
+  { type: 'heading', label: 'Heading' },
+  { type: 'text', label: 'Text' },
+  { type: 'image', label: 'Image' },
+  { type: 'button', label: 'Button' },
+  { type: 'divider', label: 'Divider' },
+  { type: 'spacer', label: 'Space' },
+  { type: 'products', label: 'Product catalog' },
 ];
 
 export function newBlock(type: BlockType): PageBlock {
