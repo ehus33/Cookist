@@ -45,10 +45,13 @@ http://localhost:8080. The gateway binds to loopback.
 ## Managed Terraform deployments
 
 When enabled, **New deployment** starts a background Terraform apply for a
-blank site or a simple business listing. The worker creates a **public**
+blank site, a simple business listing, a product storefront, or a visual-builder
+page. The worker creates a **public**
 CloudFront site backed by a private S3 bucket. Anyone with the URL can access
-the site; it is not Tailscale-private. The template does not provide ordering,
-payments, a database, or an editor for deployed sites. AWS charges continue
+the site; it is not Tailscale-private. Blank and business templates do not provide
+payments. Storefronts open seller-owned Stripe Payment Links; Cookist does not
+process sales, store card details, or provide a cart, inventory database, or an
+editor for existing deployed sites. AWS charges continue
 until the resources are destroyed; see [S3 pricing](https://aws.amazon.com/s3/pricing/)
 and [CloudFront pricing](https://aws.amazon.com/cloudfront/pricing/).
 
@@ -57,6 +60,60 @@ simple look), **Modern** (blue accents and rounded cards), **Warm** (cream tones
 and serif typography), or **Bold** (dark surfaces and purple accents). The
 creation form previews each style and updates as you enter business details.
 Preview placeholders are not deployed; blank templates remain empty.
+Generated sites include an embedded favicon, so browsers do not request a
+missing `favicon.ico` from the private S3 origin.
+
+### Selling products
+
+Choose **Storefront**, enter a store name, and add up to 20 products with names,
+optional descriptions, USD prices, and Stripe Payment Links. The themed preview
+shows the catalog but disables checkout; deployed **Buy now** buttons open Stripe.
+In **your own Stripe account**, create a one-time Payment Link for each offering
+at [Stripe Payment Links](https://dashboard.stripe.com/payment_links). Paste the
+plain `https://buy.stripe.com/...` URL without query parameters. Match the
+displayed price to its Stripe price; the hosted checkout is authoritative.
+Use `https://buy.stripe.com/test_...` links for testing; generated pages label them
+as test checkouts. Real sales require live links and an activated seller account.
+
+Store payments go to the account that owns each link, independently of Cookist's
+subscription billing and sandbox setting. No seller secret keys are requested.
+Configure shipping/address collection, taxes, receipts, and payment limits in
+Stripe. Sellers manage fulfillment and refunds there; Cookist does not verify
+stock or mark orders paid. Existing blank/business deployments are not converted.
+
+### Designing a page visually
+
+Choose **Visual builder** to open Cookist's Page studio. Drag a **Heading**,
+**Text**, **Image**, **Button**, **Divider**, **Space**, or **Product catalog**
+from Add elements onto a marked drop zone. Drag an element's **Drag** handle
+to reorder it. Drop to the **Left** or **Right** of a single element to create
+an equal-width two-element row; any mix of element types can share a row.
+Full rows accept no third column. You can also select a single element and
+choose **Add placement → Left/Right of selected** before clicking Add, or use
+**Place beside previous** for an existing element. **Stack row vertically**
+splits a pair back into separate rows. You can also click Add and use **Up** /
+**Down**, including on touch screens and with a keyboard. Select **Edit** or click an element to
+change its content, alignment, and size in Element settings. Duplicate or delete
+elements, undo/redo changes, and use **Phone preview** or **Preview page** before
+deploying. Links and checkout buttons do not navigate while editing or previewing.
+
+Up to 40 elements are supported, including one product catalog using the same
+seller-owned Stripe checkout configuration as Storefront. Images require an HTTPS
+URL and alternative text; use media you own or have permission to publish.
+Images load from the supplied host (not uploaded to Cookist), so that host must
+allow public image access and will receive browser requests. Buttons require
+HTTPS destinations. Arbitrary HTML, scripts, embeds, and custom CSS are not
+accepted. The gateway validates every element and escapes its content.
+
+This is a responsive block editor with at most two elements per row: it
+intentionally avoids overlapping absolute positioning. Pairs stack in reading
+order on screens up to 600px wide and in Phone preview. **Deploy site** publishes
+the current layout to a new S3/CloudFront site. Drafts remain only in the open
+form, not across page reloads. Existing deployments are not edited or replaced.
+Cookist's original implementation uses general interaction patterns described
+in [Wix's public element-editing documentation](https://support.wix.com/en/article/wix-editor-working-with-elements).
+That documentation was observed through REA; no signed-in Wix editor, proprietary
+source, or Wix assets were inspected or copied.
 
 The selected style is saved with the deployment and embedded in its generated
 HTML, with no external fonts or styling service required. Styles apply to new
@@ -283,14 +340,32 @@ preserved. Funnel is beta and subject to bandwidth limits; monitor Stripe's
 delivery retries. Nginx and Tailscale are enabled services, and the Funnel
 configuration is persistent.
 
-The existing worker now runs `cookist-gateway:selfserve-83fbde81bf4e`, a validated
-self-service onboarding patch on merged commit
-`a314b10120143b130ee3cb81ece6956325899449` (web 1.5.0). Billing uses the Glaucous Zipline
+The existing worker now runs `cookist-gateway:paired-a27f19cc3554`, built from merged
+commit `56d015521ca396b0614ff24596befb2599e50f9f` plus the current web 1.7.0 package
+metadata and validated generated-site favicon, storefront, visual-builder, and
+two-column element source changes. Hosted customers can
+choose Classic, Modern, Warm, or Bold styles with live previews, including on
+mobile. Billing uses the Glaucous Zipline
 **test sandbox**, not live payments. Its enabled snapshot destination listens
 to the eight events above, and its default sandbox Customer Portal is configured.
 Unsigned webhook POSTs return 400; accepted signed billing events return 204.
 Sandbox Checkout, webhook-confirmed access, portal access and cancellation
-revocation have been exercised against the hosted application.
+revocation have been exercised against the hosted application. Style selection,
+preview colors, mobile layout, API style validation and selected-style submission
+were verified without creating any AWS sites.
+The deployed visual editor was verified using isolated API fixtures: actual
+palette and reorder drags, editable settings, undo/redo, duplicate/delete,
+all seven element types, left/right placement, moving existing elements beside
+others, the two-column limit, phone placement controls, phone layout, preview,
+and exact deployment payload. Generated builder HTML was separately verified
+locally in all four styles, including equal-width desktop columns, stacking at
+600px and below, and no horizontal overflow at 390px.
+These editor checks did not create AWS sites or make payments.
+Storefront product editing and submission were exercised against the deployed
+frontend with isolated API fixtures. Actual Go-generated storefront pages were
+verified in all four styles at 390px width, and a real one-time Stripe sandbox
+checkout completed for $19.99 USD. Temporary payment links were disabled and
+test purchases refunded; this validation did not create a storefront on AWS.
 
 Test credentials are stored as SSM SecureString parameters under
 `/cookist/billing/test/`; the existing worker role can read only the two required
@@ -304,7 +379,17 @@ The flow was verified with a fresh account while the policy had no memberships.
 Other installations remain administrator-approved unless they explicitly enable
 the setting described above.
 
-The previous billing gateway is retained as
+The previous stacked-builder gateway is retained as
+`cookist-gateway-before-paired-a27f19cc3554`, with environment and startup backups
+ending in `.before-paired-a27f19cc3554`. The previous storefront gateway is retained as
+`cookist-gateway-before-builder-4ac4bb44b042`, with environment and startup backups
+ending in `.before-builder-4ac4bb44b042`. The previous favicon gateway is retained as
+`cookist-gateway-before-storefront-50783e25fa4a`, with environment and startup
+backups ending in `.before-storefront-50783e25fa4a`. The previous styles gateway is retained as
+`cookist-gateway-before-favicon-92b6a1fb36d7`, with environment and startup backups
+ending in `.before-favicon-92b6a1fb36d7`. The previous self-service gateway is retained as
+`cookist-gateway-before-styles-56d0155`, with environment and startup backups ending
+in `.before-styles-56d0155`. The previous billing gateway is retained as
 `cookist-gateway-before-selfserve-83fbde81bf4e`, with environment and startup
 backups ending in `.before-selfserve-83fbde81bf4e`. The older cleanup rollback
 `cookist-gateway-before-billing-a314b10` and its backups are also retained.
@@ -336,7 +421,21 @@ copy plus `terraform.tfvars.json` containing the account, deployment ID, region,
 and rendered HTML. Blank sites have an empty main section; business sites show
 the business name, list title (for example Menu, Products, or Services), and
 one item per non-empty line. HTML is escaped by the gateway; variable values
-are literal data, not Terraform expressions. Both templates share the same
+are literal data, not Terraform expressions. Storefronts use `businessName` and
+`products` (1–20 entries with `name`, optional `description`, integer `priceCents`
+from 1 to 99999999 in USD, and a plain `paymentLink` at `buy.stripe.com`). Products
+are accepted for `template: "storefront"` or a visual-builder product catalog.
+Visual pages use `template: "builder"` and `blocks` (1–40 entries with unique `id`,
+`type`, `text`, `url`, `alt`, `align`, and `size`). Types are `heading`, `text`,
+`image`, `button`, `divider`, `spacer`, and `products`; alignment is `left`,
+`center`, or `right`; size is `small`, `medium`, or `large`. Image/button URLs
+must use HTTPS without embedded credentials. Blocks are rejected on other
+templates; product data requires a catalog block on builder pages.
+An optional boolean `beside: true` places a block in the right column beside
+the preceding block. The first block cannot use it, and two consecutive
+`beside: true` blocks are rejected. Omitted or false values start a new row,
+preserving layouts from the original builder.
+All templates share the same
 S3/CloudFront resources.
 
 Existing deployment directories are not rewritten. Their original configuration

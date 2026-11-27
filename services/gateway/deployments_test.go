@@ -3,13 +3,16 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -700,6 +703,46 @@ func TestTerraformSiteStyles(t *testing.T) {
 	}
 }
 
+func TestTerraformFaviconDoesNotRequireAnOriginObject(t *testing.T) {
+	for _, template := range []string{"blank", "business"} {
+		t.Run(template, func(t *testing.T) {
+			config, err := terraformVariables(deploymentRequest{
+				Name: "Site", Region: "us-west-2", Template: template, Style: "modern",
+				BusinessName: "Business", ListTitle: "Services", Items: "Design",
+			}, "123456789012", strings.Repeat("a", 32))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var parsed struct {
+				Page string `json:"page_html"`
+			}
+			if err := json.Unmarshal(config, &parsed); err != nil {
+				t.Fatal(err)
+			}
+			match := regexp.MustCompile(`<link rel="icon" type="image/svg\+xml" href="data:image/svg\+xml,([^"]+)">`).FindStringSubmatch(parsed.Page)
+			if len(match) != 2 {
+				t.Fatal("generated page does not declare a self-contained favicon")
+			}
+			svg, err := url.PathUnescape(match[1])
+			if err != nil {
+				t.Fatal(err)
+			}
+			var icon struct {
+				XMLName xml.Name
+			}
+			if err := xml.Unmarshal([]byte(svg), &icon); err != nil {
+				t.Fatal(err)
+			}
+			if icon.XMLName.Local != "svg" || icon.XMLName.Space != "http://www.w3.org/2000/svg" {
+				t.Fatal("favicon is not a valid SVG document")
+			}
+			if template == "blank" && !strings.Contains(parsed.Page, "<main></main>") {
+				t.Fatal("adding a favicon changed blank-template content")
+			}
+		})
+	}
+}
+
 func TestDeploymentRejectsUnknownStylesBeforeProvisioning(t *testing.T) {
 	for _, style := range []string{"neon", "Modern", "modern ", `"></style><script>alert(1)</script>`} {
 		t.Run(style, func(t *testing.T) {
@@ -739,5 +782,126 @@ func TestTerraformPreparationRejectsInvalidInput(t *testing.T) {
 		if err != nil || len(files) != 0 {
 			t.Fatalf("invalid inputs wrote configuration: %v", err)
 		}
+	}
+}
+
+func TestTerraformStorefrontEscapesProductsAndLinksToSellerCheckout(t *testing.T) {
+	for _, style := range []string{"", "classic", "modern", "warm", "bold"} {
+		t.Run("style_"+style, func(t *testing.T) {
+			config, err := terraformVariables(deploymentRequest{
+				Name: "Deployment", Region: "us-west-2", Template: "storefront", Style: style, BusinessName: "<Shop>",
+				Products: []deploymentProduct{
+					{Name: `<img src=x onerror="bad">`, Description: `Oil & filter ${file("secret")}`, PriceCents: 2705, PaymentLink: "https://buy.stripe.com/test_abc123"},
+					{Name: "Service", PriceCents: 1, PaymentLink: "https://buy.stripe.com/abc456"},
+				},
+			}, "123456789012", strings.Repeat("a", 32))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var parsed struct {
+				Page string `json:"page_html"`
+			}
+			if err := json.Unmarshal(config, &parsed); err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range []string{
+				"<title>&lt;Shop&gt;</title>", `<ul class="store-products">`,
+				"&lt;img src=x onerror=", "Oil &amp; filter", `${file(&#34;secret&#34;)}`,
+				"$27.05 USD", "$0.01 USD", `href="https://buy.stripe.com/test_abc123"`,
+				`href="https://buy.stripe.com/abc456"`, "Test checkout - no real charge", `aria-label="Buy Service"`,
+				`<body class="generated-site site-style-`, `rel="icon"`,
+			} {
+				if !strings.Contains(parsed.Page, want) {
+					t.Errorf("missing rendered storefront value %q", want)
+				}
+			}
+			if strings.Contains(parsed.Page, "<img") || strings.Contains(parsed.Page, "<script") ||
+				strings.Contains(parsed.Page, "checkout.stripe.com") || strings.Count(parsed.Page, "Test checkout - no real charge") != 1 {
+				t.Fatal("storefront injected HTML, platform billing, or incorrect test labels")
+			}
+		})
+	}
+}
+
+func TestStorefrontRejectsInvalidProductsBeforeProvisioning(t *testing.T) {
+	valid := deploymentProduct{Name: "Product", PriceCents: 1999, PaymentLink: "https://buy.stripe.com/abc123"}
+	tests := []struct {
+		name   string
+		mutate func(*deploymentRequest)
+	}{
+		{"no_store_name", func(r *deploymentRequest) { r.BusinessName = " " }},
+		{"no_products", func(r *deploymentRequest) { r.Products = nil }},
+		{"too_many_products", func(r *deploymentRequest) { r.Products = make([]deploymentProduct, 21) }},
+		{"blank_name", func(r *deploymentRequest) { r.Products[0].Name = " " }},
+		{"long_name", func(r *deploymentRequest) { r.Products[0].Name = strings.Repeat("a", 321) }},
+		{"long_description", func(r *deploymentRequest) { r.Products[0].Description = strings.Repeat("a", 2001) }},
+		{"free", func(r *deploymentRequest) { r.Products[0].PriceCents = 0 }},
+		{"negative_price", func(r *deploymentRequest) { r.Products[0].PriceCents = -1 }},
+		{"price_over_limit", func(r *deploymentRequest) { r.Products[0].PriceCents = 100000000 }},
+		{"wrong_template", func(r *deploymentRequest) { r.Template = "blank" }},
+	}
+	for _, link := range []string{
+		"http://buy.stripe.com/abc", "javascript:alert(1)", "https://buy.stripe.com.attacker.example/abc",
+		"https://checkout.stripe.com/c/pay/abc", "https://buy.stripe.com@attacker.example/abc",
+		"https://user@buy.stripe.com/abc", "https://buy.stripe.com:443/abc",
+		"https://buy.stripe.com/abc?prefilled_email=private@example.com", "https://buy.stripe.com/abc#",
+		"https://buy.stripe.com/%61bc", "https://buy.stripe.com/", "https://buy.stripe.com/abc\n",
+	} {
+		tests = append(tests, struct {
+			name   string
+			mutate func(*deploymentRequest)
+		}{link, func(r *deploymentRequest) { r.Products[0].PaymentLink = link }})
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			w, _ := testWorker(t)
+			req := deploymentRequest{Name: "Site", Region: "us-west-2", Template: "storefront", BusinessName: "Store", Products: []deploymentProduct{valid}}
+			test.mutate(&req)
+			body, err := json.Marshal(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rec := requestDeployment(w, http.MethodPost, "Bearer owner", string(body))
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("invalid product returned %d: %s", rec.Code, rec.Body)
+			}
+			entries, err := os.ReadDir(w.root)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("invalid product created deployment files: %v", err)
+			}
+		})
+	}
+}
+
+func TestStorefrontAcceptsTwentyProductsWithoutRealAWS(t *testing.T) {
+	t.Setenv("COOKIST_TEST_TERRAFORM_HELPER", "1")
+	w, _ := testWorker(t)
+	req := deploymentRequest{Name: "Store", Region: "us-west-2", Template: "storefront", BusinessName: "Store"}
+	for range 20 {
+		req.Products = append(req.Products, deploymentProduct{
+			Name: "Product", Description: strings.Repeat("商品", 250), PriceCents: 99999999,
+			PaymentLink: "https://buy.stripe.com/test_abc123",
+		})
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec := requestDeployment(w, http.MethodPost, "Bearer owner", string(body)); rec.Code != http.StatusAccepted {
+		t.Fatalf("valid large storefront returned %d: %s", rec.Code, rec.Body)
+	}
+	d := waitDeployment(t, w, "ready")
+	content, err := os.ReadFile(filepath.Join(w.root, d.ID, "terraform.tfvars.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var variables struct {
+		Page string `json:"page_html"`
+	}
+	if err := json.Unmarshal(content, &variables); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(variables.Page, `aria-label="Buy Product"`) != 20 {
+		t.Fatal("valid storefront did not preserve all twenty product checkout buttons")
 	}
 }

@@ -2,9 +2,26 @@ import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { api, errorMessage } from './api';
 import type { Session } from './types';
+import { SiteEditor } from './SiteEditor';
+import { blockError } from './pageBlocks';
+import type { PageBlock } from './pageBlocks';
 import '../../../services/gateway/site_styles.css';
 
-type DeploymentTemplate = 'blank' | 'business';
+type DeploymentTemplate = 'blank' | 'business' | 'storefront' | 'builder';
+type ProductDraft = { id: number; name: string; description: string; price: string; paymentLink: string };
+type StoreProduct = { name: string; description: string; priceCents: number; paymentLink: string };
+function newProduct(id: number): ProductDraft {
+  return { id, name: '', description: '', price: '', paymentLink: '' };
+}
+function productPriceCents(price: string): number | null {
+  if (!/^\d{1,6}(?:\.\d{1,2})?$/.test(price)) return null;
+  const [dollars, cents = ''] = price.split('.');
+  const value = Number(dollars) * 100 + Number(cents.padEnd(2, '0'));
+  return value >= 1 && value <= 99999999 ? value : null;
+}
+function isPaymentLink(link: string): boolean {
+  return /^https:\/\/buy\.stripe\.com\/(?:test_)?[A-Za-z0-9]+$/.test(link) && link.length <= 200;
+}
 type SiteStyle = 'classic' | 'modern' | 'warm' | 'bold';
 const siteStyles: { id: SiteStyle; name: string; description: string }[] = [
   { id: 'classic', name: 'Classic', description: 'Simple, familiar, and distraction-free.' },
@@ -87,6 +104,9 @@ export function App({ authenticatedSession, onSignOut, authError }: {
   const [businessName, setBusinessName] = useState('');
   const [listTitle, setListTitle] = useState('Services');
   const [items, setItems] = useState('');
+  const [products, setProducts] = useState<ProductDraft[]>([newProduct(1)]);
+  const [blocks, setBlocks] = useState<PageBlock[]>([]);
+  const nextProductId = useRef(2);
   const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
   const [deployments, setDeployments] = useState<Deployment[]>([]);
   const [loadError, setLoadError] = useState('');
@@ -99,6 +119,7 @@ export function App({ authenticatedSession, onSignOut, authError }: {
   const [billingLink, setBillingLink] = useState<{ url: string; portal: boolean } | null>(null);
   const currentAccess = loadedActor === authenticatedSession?.actorId ? access : null;
   const previewItems = items.split('\n').map(item => item.trim()).filter(Boolean);
+  const usesProducts = template === 'storefront' || (template === 'builder' && blocks.some(block => block.type === 'products'));
   const visibleDeployments = loadedActor === authenticatedSession?.actorId ? deployments : [];
   const newDeploymentButton = useRef<HTMLButtonElement>(null);
   const requestVersion = useRef(0);
@@ -118,6 +139,8 @@ export function App({ authenticatedSession, onSignOut, authError }: {
     setDeleting(null);
     setBillingPending(false);
     setBillingLink(null);
+    setProducts([newProduct(1)]);
+    setBlocks([]);
     if (!authenticatedSession) return;
     const session = authenticatedSession;
     const controller = new AbortController();
@@ -169,6 +192,28 @@ export function App({ authenticatedSession, onSignOut, authError }: {
       setMessage({ text: 'Select an available AWS region.', error: true });
       return;
     }
+    const submittedProducts: StoreProduct[] = [];
+    if (template === 'builder') {
+      const error = blockError(blocks);
+      if (error) {
+        setMessage({ text: error, error: true });
+        return;
+      }
+    }
+    if (usesProducts) {
+      if (!businessName.trim() || products.length < 1 || products.length > 20) {
+        setMessage({ text: 'Enter a store name and between 1 and 20 products.', error: true });
+        return;
+      }
+      for (const [index, product] of products.entries()) {
+        const priceCents = productPriceCents(product.price);
+        if (!product.name.trim() || priceCents === null || !isPaymentLink(product.paymentLink.trim())) {
+          setMessage({ text: `Product ${index + 1} needs a name, a USD price from $0.01 to $999999.99, and a plain https://buy.stripe.com/ Payment Link.`, error: true });
+          return;
+        }
+        submittedProducts.push({ name: product.name, description: product.description, priceCents, paymentLink: product.paymentLink.trim() });
+      }
+    }
     if (!authenticatedSession || !currentAccess?.canCreate) {
       setMessage({ text: 'Your account does not currently have permission to deploy.', error: true });
       return;
@@ -178,7 +223,9 @@ export function App({ authenticatedSession, onSignOut, authError }: {
     const version = sessionVersion.current;
     try {
       const result = await api<unknown>('/api/deployments', authenticatedSession, {
-        method: 'POST', body: { name, region, template, style: siteStyle, businessName, listTitle, items },
+        method: 'POST', body: { name, region, template, style: siteStyle, businessName, listTitle, items,
+          ...(usesProducts ? { products: submittedProducts } : {}),
+          ...(template === 'builder' ? { blocks } : {}) },
       });
       if (version !== sessionVersion.current) return;
       if (!isDeployment(result)) throw new Error('The server returned an invalid deployment.');
@@ -192,6 +239,10 @@ export function App({ authenticatedSession, onSignOut, authError }: {
     } finally {
       if (version === sessionVersion.current) setSubmitting(false);
     }
+  }
+
+  function updateProduct(id: number, field: 'name' | 'description' | 'price' | 'paymentLink', value: string) {
+    setProducts(previous => previous.map(product => product.id === id ? { ...product, [field]: value } : product));
   }
 
   async function deleteDeployment(target: Deployment) {
@@ -241,7 +292,21 @@ export function App({ authenticatedSession, onSignOut, authError }: {
     }
   }
 
-  return <main className="workspace">
+  const catalogPreview = <>
+    <p className="store-checkout-note">Secure checkout by Stripe. Final price, availability, shipping and taxes are confirmed at checkout.</p>
+    <ul className="store-products">{products.map(product => {
+      const priceCents = productPriceCents(product.price);
+      return <li key={product.id}>
+        <h3>{product.name.trim() || 'Your product'}</h3>
+        <p className="store-description">{product.description.trim()}</p>
+        <p className="store-price">{priceCents === null ? 'Enter a price' : `$${(priceCents / 100).toFixed(2)} USD`}</p>
+        {product.paymentLink.trim().startsWith('https://buy.stripe.com/test_') && <p className="store-test-notice">Test checkout - no real charge</p>}
+        <button type="button" className="store-buy" disabled>Buy now</button>
+      </li>;
+    })}</ul>
+  </>;
+
+  return <main className={`workspace${creating && template === 'builder' ? ' has-page-builder' : ''}`}>
     <header>
       <div>
         <h1>Cookist</h1>
@@ -311,7 +376,7 @@ export function App({ authenticatedSession, onSignOut, authError }: {
       </section>}
       {!creating && visibleDeployments.length === 0 && (!authenticatedSession || currentAccess?.canList) && <div className="empty-state">
         <h3>Start with a blank slate</h3>
-        <p>Or choose a business template for a menu, services, or another list.</p>
+        <p>Choose a business listing, or sell products with a Stripe-powered storefront.</p>
       </div>}
       {!creating && message && <p role={message.error ? 'alert' : 'status'}>{message.text}</p>}
       {creating && (!authenticatedSession || currentAccess?.canCreate) && <form className="deployment-form" onSubmit={event => void deploy(event)}>
@@ -333,11 +398,39 @@ export function App({ authenticatedSession, onSignOut, authError }: {
             <input type="radio" name="template" checked={template === 'business'} onChange={() => setTemplate('business')} />
             <span><strong>Business listing</strong><small>A simple menu, service list, or other offering.</small></span>
           </label>
+          <label className="template-choice">
+            <input type="radio" name="template" checked={template === 'storefront'} onChange={() => setTemplate('storefront')} />
+            <span><strong>Storefront</strong><small>Sell products using your own Stripe Payment Links.</small></span>
+          </label>
+          <label className="template-choice">
+            <input type="radio" name="template" checked={template === 'builder'} onChange={() => setTemplate('builder')} />
+            <span><strong>Visual builder</strong><small>Drag and drop elements to design your own page.</small></span>
+          </label>
         </fieldset>
         {template === 'business' && <div className="business-fields">
           <label>Business name<input required maxLength={80} value={businessName} onChange={event => setBusinessName(event.target.value)} /></label>
           <label>List title<input required maxLength={80} value={listTitle} onChange={event => setListTitle(event.target.value)} /></label>
           <label>Items, one per line<textarea maxLength={2000} rows={4} value={items} onChange={event => setItems(event.target.value)} /></label>
+        </div>}
+        {usesProducts && <div className="storefront-fields">
+          <label>Store name<input required maxLength={80} value={businessName} onChange={event => setBusinessName(event.target.value)} /></label>
+          <p>Create a one-time Payment Link for each product in <a href="https://dashboard.stripe.com/payment_links" target="_blank" rel="noreferrer">your Stripe account</a>,
+            then paste it below. Sales go to that Stripe account, not to Cookist subscription billing.
+            Match the displayed price to the link. Configure shipping, taxes, receipts and inventory limits in Stripe; fulfill orders and manage refunds there.
+            Test links do not collect real money; use live links only when your seller account is ready.</p>
+          {products.map((product, index) => <fieldset className="product-editor" key={product.id} disabled={submitting}>
+            <legend>Product {index + 1}</legend>
+            <label>Product {index + 1} name<input required maxLength={80} value={product.name} onChange={event => updateProduct(product.id, 'name', event.target.value)} /></label>
+            <label>Product {index + 1} description<textarea maxLength={500} rows={3} value={product.description} onChange={event => updateProduct(product.id, 'description', event.target.value)} /></label>
+            <label>Product {index + 1} price (USD)<input required inputMode="decimal" placeholder="19.99" maxLength={9} pattern="[0-9]{1,6}([.][0-9]{1,2})?" value={product.price} onChange={event => updateProduct(product.id, 'price', event.target.value)} /></label>
+            <label>Product {index + 1} Stripe Payment Link<input required type="url" maxLength={200} placeholder="https://buy.stripe.com/..." value={product.paymentLink} onChange={event => updateProduct(product.id, 'paymentLink', event.target.value)} /></label>
+            {product.paymentLink.trim().startsWith('https://buy.stripe.com/test_') && <small>Test checkout - no real charge</small>}
+            <button type="button" className="secondary" disabled={products.length === 1} onClick={() => setProducts(previous => previous.filter(item => item.id !== product.id))}>Remove product {index + 1}</button>
+          </fieldset>)}
+          <button type="button" className="secondary" disabled={submitting || products.length >= 20} onClick={() => {
+            const product = newProduct(nextProductId.current++);
+            setProducts(previous => [...previous, product]);
+          }}>Add product</button>
         </div>}
         <fieldset>
           <legend>Choose a site style</legend>
@@ -355,23 +448,27 @@ export function App({ authenticatedSession, onSignOut, authError }: {
             </label>)}
           </div>
         </fieldset>
-        <div className="site-preview-block">
+        {template === 'builder' ? <SiteEditor blocks={blocks} onChange={setBlocks} style={siteStyle} disabled={submitting} catalog={catalogPreview} /> : <div className="site-preview-block">
           <h4>Site preview</h4>
           <div className={`site-preview generated-site site-style-${siteStyle}`} role="region" aria-label="Site preview">
             <div className="site-content">
-              <h4 className="site-title">{template === 'business' ? businessName.trim() || 'Your business' : name.trim() || 'Your site'}</h4>
-              <h5 className="site-list-title">{template === 'business' ? listTitle.trim() || 'Your offerings' : 'Your next big idea'}</h5>
-              <ul>{(template === 'business' && previewItems.length ? previewItems : ['Your first offering', 'Something your customers will love']).map((item, index) =>
-                <li key={index}>{item}</li>)}</ul>
+              <h4 className="site-title">{template !== 'blank' ? businessName.trim() || (template === 'storefront' ? 'Your store' : 'Your business') : name.trim() || 'Your site'}</h4>
+              {template === 'storefront' ? catalogPreview : <>
+                <h5 className="site-list-title">{template === 'business' ? listTitle.trim() || 'Your offerings' : 'Your next big idea'}</h5>
+                <ul>{(template === 'business' && previewItems.length ? previewItems : ['Your first offering', 'Something your customers will love']).map((item, index) =>
+                  <li key={index}>{item}</li>)}</ul>
+              </>}
             </div>
           </div>
           <p className="site-preview-note">{template === 'blank'
             ? 'Sample content previews the style only. Your blank site stays empty.'
+            : template === 'storefront' ? "Buy buttons are disabled in this preview. Your deployed site opens each product's Stripe checkout."
             : 'Your business details update this preview. Empty lists show sample items here only.'}</p>
-        </div>
+        </div>}
         <p className="deployment-notice">Deploying creates a public static site on AWS S3 and CloudFront in the configured AWS account.
           Anyone with the site URL can access it; it is not Tailscale-private.
-          AWS charges may apply until the resources are destroyed. The business template is a static list, not ordering or payments.</p>
+          AWS charges may apply until the resources are destroyed. Business listings are static lists; storefronts link to seller-owned Stripe checkout.
+          Cookist does not store card details or process storefront orders.</p>
         <div className="form-actions"><button className="primary" type="submit" disabled={submitting || !authenticatedSession}>{submitting ? 'Starting...' : 'Deploy site'}</button>
           <button type="button" className="secondary" disabled={submitting} onClick={() => { setCreating(false); setMessage(null); newDeploymentButton.current?.focus(); }}>Cancel</button></div>
         {message && <p role={message.error ? 'alert' : 'status'}>{message.text}</p>}

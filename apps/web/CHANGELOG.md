@@ -1,5 +1,18 @@
 # @cookist/web
 
+## 1.7.1
+
+### Patch Changes
+
+- Allow two visual-builder elements of any mix to share a row using left/right drag targets or accessible placement controls. Preserve pairs through undo/redo, movement, duplication and deletion, validate the two-element limit on the server, and stack paired elements on phones.
+
+## 1.7.0
+
+### Minor Changes
+
+- Add themed storefronts with up to 20 products, USD prices, descriptions, and seller-owned Stripe Payment Link checkout. Validate product data and checkout destinations on the server, label sandbox links, and keep storefront revenue separate from Cookist subscription billing. Preserve blank and business templates.
+- Add an original visual page builder with drag-and-drop elements, responsive phone preview, editable content and sizing, reorder controls, duplication, deletion, and undo/redo. Publish validated headings, text, images, links, spacing, and seller-owned product catalogs through the existing deployment workflow while preserving existing templates and permissions.
+
 ## 1.6.0
 
 ### Minor Changes
