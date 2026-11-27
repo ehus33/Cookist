@@ -60,6 +60,14 @@ func newGateway(coreURL, webDist string, origins []string, deployments *deployme
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "same-origin")
 		w.Header().Set("X-Frame-Options", "DENY")
+		if strings.HasPrefix(r.URL.Path, "/apps/") {
+			if deployments == nil {
+				jsonError(w, 503, "dynamic_unavailable", "Dynamic apps are not configured.")
+			} else {
+				deployments.dynamicPublicRoute(w, r)
+			}
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/forms/") {
 			if deployments == nil {
 				jsonError(w, 503, "forms_unavailable", "Lead forms are not configured.")
@@ -264,6 +272,29 @@ func main() {
 		if deployments.publicOrigin != "" && !validFormOrigin(deployments.publicOrigin) {
 			log.Fatal("COOKIST_PUBLIC_ORIGIN must be an HTTPS origin without a path for lead forms")
 		}
+		dynamicRegion := os.Getenv("COOKIST_DYNAMIC_REGION")
+		dynamicTable := os.Getenv("COOKIST_DYNAMIC_TABLE")
+		visitorPool := os.Getenv("COOKIST_VISITOR_POOL_ID")
+		visitorClient := os.Getenv("COOKIST_VISITOR_CLIENT_ID")
+		if dynamicRegion != "" || dynamicTable != "" || visitorPool != "" || visitorClient != "" {
+			if dynamicRegion == "" || dynamicTable == "" || visitorPool == "" || visitorClient == "" {
+				log.Fatal("Dynamic apps require region, table, visitor pool and visitor client together")
+			}
+			if !validFormOrigin(deployments.publicOrigin) {
+				log.Fatal("Dynamic apps require COOKIST_PUBLIC_ORIGIN to be a valid HTTPS origin")
+			}
+			if visitorClient == os.Getenv("VITE_COGNITO_CLIENT_ID") ||
+				strings.Contains(os.Getenv("COOKIST_COGNITO_CLIENT_IDS"), visitorClient) ||
+				strings.HasSuffix(os.Getenv("COOKIST_COGNITO_ISSUER"), "/"+visitorPool) {
+				log.Fatal("Dynamic visitor authentication must use a separate Cognito pool/client from Cookist owners")
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			deployments.dynamic, err = newDynamicService(ctx, dynamicRegion, dynamicTable, visitorPool, visitorClient)
+			cancel()
+			if err != nil {
+				log.Fatal(err)
+			}
+		}
 		if _, err := loadAccessPolicy(deployments.accessFile); err != nil {
 			log.Fatalf("deployment access configuration is invalid: %v", err)
 		}
@@ -295,6 +326,25 @@ func main() {
 		deployments.selfServiceBilling = true
 	default:
 		log.Fatal("COOKIST_SELF_SERVICE_BILLING must be true or false")
+	}
+	if price := os.Getenv("COOKIST_DATABASE_PRICE_ID"); price != "" {
+		log.Fatal("Fixed-price database billing is no longer enabled in this server; remove COOKIST_DATABASE_PRICE_ID and configure COOKIST_DATABASE_COST_BILLING")
+	}
+	switch env("COOKIST_DATABASE_COST_BILLING", "false") {
+	case "false":
+	case "true":
+		if deployments == nil {
+			log.Fatal("Actual database cost billing requires a deployment worker")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err := deployments.configureDatabaseUsage(ctx)
+		cancel()
+		if err != nil {
+			log.Fatal(err)
+		}
+		go deployments.runDatabaseUsageBilling()
+	default:
+		log.Fatal("COOKIST_DATABASE_COST_BILLING must be true or false")
 	}
 	handler, err := newGateway(
 		coreURL, env("WEB_DIST", "apps/web/dist"),

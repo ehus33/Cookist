@@ -22,17 +22,34 @@ import (
 type stripeBilling struct {
 	client                      *stripe.Client
 	root, origin, price, secret string
+	databasePrice               string
+	usage                       *databaseUsageBilling
 	live                        bool
 }
 
 type tenantBilling struct {
-	CustomerID      string `json:"customerId,omitempty"`
-	CheckoutID      string `json:"checkoutId,omitempty"`
-	AttemptID       string `json:"attemptId,omitempty"`
-	PriceID         string `json:"priceId"`
-	ValidUntil      int64  `json:"validUntil"`
-	HasSubscription bool   `json:"hasSubscription"`
-	CheckoutPrice   string `json:"checkoutPrice,omitempty"`
+	CustomerID              string             `json:"customerId,omitempty"`
+	CheckoutID              string             `json:"checkoutId,omitempty"`
+	AttemptID               string             `json:"attemptId,omitempty"`
+	PriceID                 string             `json:"priceId"`
+	ValidUntil              int64              `json:"validUntil"`
+	HasSubscription         bool               `json:"hasSubscription"`
+	CheckoutPrice           string             `json:"checkoutPrice,omitempty"`
+	DatabasePriceID         string             `json:"databasePriceId,omitempty"`
+	DatabaseValidUntil      int64              `json:"databaseValidUntil,omitempty"`
+	DatabaseHasSubscription bool               `json:"databaseHasSubscription,omitempty"`
+	DatabaseCheckoutID      string             `json:"databaseCheckoutId,omitempty"`
+	DatabaseAttemptID       string             `json:"databaseAttemptId,omitempty"`
+	DatabaseCheckoutPrice   string             `json:"databaseCheckoutPrice,omitempty"`
+	DatabaseCheckoutModel   string             `json:"databaseCheckoutModel,omitempty"`
+	DatabaseAuthorized      bool               `json:"databaseAuthorized,omitempty"`
+	DatabaseConsentAt       int64              `json:"databaseConsentAt,omitempty"`
+	DatabasePaymentMethod   string             `json:"databasePaymentMethod,omitempty"`
+	DatabasePaymentFailed   bool               `json:"databasePaymentFailed,omitempty"`
+	DatabaseState           string             `json:"databaseState,omitempty"`
+	DatabaseResourceStart   int64              `json:"databaseResourceStart,omitempty"`
+	DatabaseScope           string             `json:"databaseScope,omitempty"`
+	DatabaseLifetimes       []databaseLifetime `json:"databaseLifetimes,omitempty"`
 }
 
 func newStripeBilling(root, origin, price, key, secret, mode string) (*stripeBilling, error) {
@@ -120,6 +137,8 @@ func (b *stripeBilling) refresh(ctx context.Context, tenant string, record *tena
 	params.AddExpand("data.latest_invoice")
 	validUntil := int64(0)
 	hasSubscription := false
+	databaseValidUntil := int64(0)
+	databaseHasSubscription := false
 	for subscription, err := range b.client.V1Subscriptions.List(ctx, params).All(ctx) {
 		if err != nil {
 			return err
@@ -132,22 +151,41 @@ func (b *stripeBilling) refresh(ctx context.Context, tenant string, record *tena
 			continue
 		}
 		for _, item := range subscription.Items.Data {
-			if item == nil || item.Price == nil || item.Price.ID != b.price {
+			if item == nil || item.Price == nil {
+				continue
+			}
+			database := b.databasePrice != "" && item.Price.ID == b.databasePrice
+			if item.Price.ID != b.price && !database {
 				continue
 			}
 			switch subscription.Status {
 			case stripe.SubscriptionStatusActive, stripe.SubscriptionStatusPastDue, stripe.SubscriptionStatusUnpaid,
 				stripe.SubscriptionStatusPaused, stripe.SubscriptionStatusTrialing, stripe.SubscriptionStatusIncomplete:
-				hasSubscription = true
+				if database {
+					databaseHasSubscription = true
+				} else {
+					hasSubscription = true
+				}
 			}
 			if item.Quantity == 1 && subscription.Status == stripe.SubscriptionStatusActive && subscription.LatestInvoice != nil &&
-				subscription.LatestInvoice.Status == stripe.InvoiceStatusPaid && item.CurrentPeriodEnd > validUntil {
-				validUntil = item.CurrentPeriodEnd
+				subscription.LatestInvoice.Status == stripe.InvoiceStatusPaid {
+				if database && item.CurrentPeriodEnd > databaseValidUntil {
+					databaseValidUntil = item.CurrentPeriodEnd
+				} else if !database && item.CurrentPeriodEnd > validUntil {
+					validUntil = item.CurrentPeriodEnd
+				}
 			}
 		}
 	}
 	record.ValidUntil, record.PriceID = validUntil, b.price
 	record.HasSubscription = hasSubscription
+	record.DatabaseValidUntil, record.DatabasePriceID = databaseValidUntil, b.databasePrice
+	record.DatabaseHasSubscription = databaseHasSubscription
+	if b.usage != nil {
+		if err := b.usage.refreshTenant(ctx, tenant, record); err != nil {
+			return err
+		}
+	}
 	return b.save(tenant, *record)
 }
 
@@ -160,6 +198,20 @@ func stripeRedirect(raw, host string) (string, error) {
 }
 
 func (b *stripeBilling) checkout(ctx context.Context, tenant string) (string, error) {
+	return b.checkoutPlan(ctx, tenant, false)
+}
+
+func (b *stripeBilling) checkoutPlan(ctx context.Context, tenant string, database bool) (string, error) {
+	if database && b.usage != nil {
+		return b.checkoutUsage(ctx, tenant)
+	}
+	priceID := b.price
+	if database {
+		priceID = b.databasePrice
+		if priceID == "" {
+			return "", &deploymentError{503, "database_billing_unavailable", "The database add-on price is not configured."}
+		}
+	}
 	unlock, err := b.lock(tenant)
 	if err != nil {
 		return "", err
@@ -169,12 +221,15 @@ func (b *stripeBilling) checkout(ctx context.Context, tenant string) (string, er
 	if err != nil {
 		return "", err
 	}
-	price, err := b.client.V1Prices.Retrieve(ctx, b.price, nil)
+	price, err := b.client.V1Prices.Retrieve(ctx, priceID, nil)
 	if err != nil {
 		return "", err
 	}
 	if !price.Active || price.Livemode != b.live || price.Recurring == nil || price.Recurring.UsageType != stripe.PriceRecurringUsageTypeLicensed {
 		return "", errors.New("configured Stripe price must be an active, fixed recurring price in the configured mode")
+	}
+	if database && (!validDatabasePrice(price) || price.ID != priceID) {
+		return "", errors.New("database price must be a fixed positive monthly USD price")
 	}
 	if record.CustomerID == "" {
 		params := &stripe.CustomerCreateParams{Metadata: map[string]string{"CookistTenant": tenant}}
@@ -194,28 +249,42 @@ func (b *stripeBilling) checkout(ctx context.Context, tenant string) (string, er
 	if err := b.refresh(ctx, tenant, &record); err != nil {
 		return "", err
 	}
-	if record.HasSubscription {
+	hasSubscription := record.HasSubscription
+	checkoutID, attemptID, checkoutPrice := &record.CheckoutID, &record.AttemptID, &record.CheckoutPrice
+	kind := ""
+	if database {
+		if record.PriceID != b.price || record.ValidUntil <= time.Now().Unix() {
+			return "", &deploymentError{403, "subscription_required", "Activate your Cookist subscription before adding a database plan."}
+		}
+		hasSubscription = record.DatabaseHasSubscription
+		checkoutID, attemptID, checkoutPrice = &record.DatabaseCheckoutID, &record.DatabaseAttemptID, &record.DatabaseCheckoutPrice
+		kind = "database-"
+	}
+	if hasSubscription {
 		return "", &deploymentError{409, "already_subscribed", "Your organization already has a subscription. Use Manage billing."}
 	}
-	if record.CheckoutID != "" {
-		session, err := b.client.V1CheckoutSessions.Retrieve(ctx, record.CheckoutID, nil)
+	if *checkoutID != "" {
+		session, err := b.client.V1CheckoutSessions.Retrieve(ctx, *checkoutID, nil)
 		if err != nil {
 			return "", err
 		}
 		if session.Status == stripe.CheckoutSessionStatusOpen {
-			if record.CheckoutPrice != b.price {
+			if *checkoutPrice != priceID {
 				return "", &deploymentError{409, "checkout_price_changed", "An older checkout is still open. Ask the operator to expire it before starting checkout for the new price."}
+			}
+			if database && (session.Customer == nil || session.Customer.ID != record.CustomerID || session.Livemode != b.live) {
+				return "", errors.New("database checkout customer or mode changed")
 			}
 			return stripeRedirect(session.URL, "checkout.stripe.com")
 		}
-		record.CheckoutID, record.AttemptID = "", ""
+		*checkoutID, *attemptID = "", ""
 	}
-	if record.AttemptID == "" {
+	if *attemptID == "" {
 		var id [16]byte
 		if _, err := rand.Read(id[:]); err != nil {
 			return "", err
 		}
-		record.AttemptID = hex.EncodeToString(id[:])
+		*attemptID = hex.EncodeToString(id[:])
 		if err := b.save(tenant, record); err != nil {
 			return "", err
 		}
@@ -223,13 +292,17 @@ func (b *stripeBilling) checkout(ctx context.Context, tenant string) (string, er
 	params := &stripe.CheckoutSessionCreateParams{
 		Mode: stripe.String("subscription"), Customer: stripe.String(record.CustomerID),
 		ClientReferenceID: stripe.String(tenant),
-		LineItems:         []*stripe.CheckoutSessionCreateLineItemParams{{Price: stripe.String(b.price), Quantity: stripe.Int64(1)}},
+		LineItems:         []*stripe.CheckoutSessionCreateLineItemParams{{Price: stripe.String(priceID), Quantity: stripe.Int64(1)}},
 		SuccessURL:        stripe.String(b.origin + "/?billing=returned"),
 		CancelURL:         stripe.String(b.origin + "/?billing=cancelled"),
 		Metadata:          map[string]string{"CookistTenant": tenant},
 		SubscriptionData:  &stripe.CheckoutSessionCreateSubscriptionDataParams{Metadata: map[string]string{"CookistTenant": tenant}},
 	}
-	params.SetIdempotencyKey("cookist-checkout-" + tenant + "-" + record.AttemptID)
+	if database {
+		params.Metadata["CookistPlan"] = "database"
+		params.SubscriptionData.Metadata["CookistPlan"] = "database"
+	}
+	params.SetIdempotencyKey("cookist-checkout-" + kind + tenant + "-" + *attemptID)
 	session, err := b.client.V1CheckoutSessions.Create(ctx, params)
 	if err != nil {
 		return "", err
@@ -238,7 +311,10 @@ func (b *stripeBilling) checkout(ctx context.Context, tenant string) (string, er
 	if err != nil || session.ID == "" {
 		return "", errors.New("Stripe returned an invalid checkout session")
 	}
-	record.CheckoutID, record.CheckoutPrice = session.ID, b.price
+	if database && (session.Customer == nil || session.Customer.ID != record.CustomerID || session.Livemode != b.live) {
+		return "", errors.New("Stripe returned an unexpected database checkout customer or mode")
+	}
+	*checkoutID, *checkoutPrice = session.ID, priceID
 	if err := b.save(tenant, record); err != nil {
 		return "", err
 	}
@@ -257,6 +333,9 @@ func (w *deploymentWorker) billingRoute(rw http.ResponseWriter, r *http.Request)
 	access, err := w.authorize(r)
 	if err != nil {
 		w.billingError(rw, err)
+		return
+	}
+	if w.databaseBillingRoute(rw, r, access) {
 		return
 	}
 	if r.URL.Path != "/api/billing/checkout" && r.URL.Path != "/api/billing/portal" {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"embed"
@@ -35,6 +36,7 @@ type deploymentRequest struct {
 	FormOrigin        string                `json:"-"`
 	DraftProducts     []builderProductDraft `json:"draftProducts,omitempty"`
 	DraftDeploymentID string                `json:"draftDeploymentId,omitempty"`
+	Dynamic           *dynamicConfig        `json:"dynamic,omitempty"`
 }
 
 type builderProductDraft struct {
@@ -62,6 +64,7 @@ type deployment struct {
 	CreatedBy       string `json:"createdBy,omitempty"`
 	CanDelete       bool   `json:"canDelete"`
 	CanEdit         bool   `json:"canEdit,omitempty"`
+	CanData         bool   `json:"canData,omitempty"`
 	LastUpdateError string `json:"lastUpdateError,omitempty"`
 }
 
@@ -75,6 +78,7 @@ type deploymentWorker struct {
 	billing                                  *stripeBilling
 	publicOrigin                             string
 	formRates                                map[string]submissionRate
+	dynamic                                  *dynamicService
 	client                                   *http.Client
 	mu                                       sync.Mutex
 	execute                                  func(context.Context, string, io.Writer, ...string) ([]byte, error)
@@ -186,10 +190,12 @@ func (w *deploymentWorker) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		}
 		rw.Header().Set("Content-Type", "application/json")
 		rw.Header().Set("Cache-Control", "no-store")
+		access.DynamicEnabled = w.dynamic != nil
+		access.DatabaseBillingAvailable = w.billing != nil && (w.billing.databasePrice != "" || w.billing.usage != nil)
 		_ = json.NewEncoder(rw).Encode(access)
 		return
 	}
-	if w.builderDesignRoute(rw, r, access) || w.submissionsRoute(rw, r, access) {
+	if w.dynamicAdminRoute(rw, r, access) || w.builderDesignRoute(rw, r, access) || w.submissionsRoute(rw, r, access) {
 		return
 	}
 	action := "list"
@@ -251,6 +257,14 @@ func validateDeployment(req deploymentRequest) error {
 		if err := validatePageBlocks(req.Blocks); err != nil {
 			return err
 		}
+		if err := validateDynamicConfig(req.Dynamic); err != nil {
+			return err
+		}
+		if err := validateDynamicBlocks(req); err != nil {
+			return err
+		}
+	} else if req.Dynamic != nil {
+		return errors.New("Dynamic collections require the visual builder template.")
 	} else if len(req.Blocks) > 0 {
 		return errors.New("Page elements require the visual builder template.")
 	}
@@ -276,8 +290,13 @@ func validateDeployment(req deploymentRequest) error {
 }
 
 func (w *deploymentWorker) create(rw http.ResponseWriter, r *http.Request, access deploymentAccess) {
+	data, err := io.ReadAll(http.MaxBytesReader(rw, r.Body, builderRequestLimit))
+	if err != nil {
+		jsonError(rw, 400, "invalid_request", "Invalid deployment request.")
+		return
+	}
 	var request deploymentRequest
-	decoder := json.NewDecoder(http.MaxBytesReader(rw, r.Body, 524288))
+	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil {
 		jsonError(rw, 400, "invalid_request", "Invalid deployment request.")
@@ -287,11 +306,25 @@ func (w *deploymentWorker) create(rw http.ResponseWriter, r *http.Request, acces
 		jsonError(rw, 400, "invalid_request", "Invalid deployment request.")
 		return
 	}
+	if request.Dynamic != nil {
+		request, err = decodeBuilderRequest(data)
+		if err != nil {
+			jsonError(rw, 400, "invalid_request", err.Error())
+			return
+		}
+	}
 	if err := validateDeployment(request); err != nil {
 		jsonError(rw, 400, "invalid_request", err.Error())
 		return
 	}
 	request.FormOrigin = w.publicOrigin
+	if request.Dynamic != nil && (w.dynamic == nil || !validFormOrigin(w.publicOrigin)) {
+		jsonError(rw, 503, "dynamic_unavailable", "Dynamic apps require a configured database, visitor identity pool and HTTPS public origin.")
+		return
+	}
+	if request.Dynamic != nil && !w.requireDatabase(rw, access.TenantID) {
+		return
+	}
 	if hasLeadForm(request.Blocks) && !validFormOrigin(request.FormOrigin) {
 		jsonError(rw, 503, "forms_unavailable", "Lead forms require a configured HTTPS public origin.")
 		return
@@ -462,7 +495,19 @@ func (w *deploymentWorker) run(dir string, d deployment) {
 		defer logFile.Close()
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 		defer cancel()
+		if w.billing != nil && w.billing.usage != nil {
+			design, readErr := readBuilderDesign(dir)
+			if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+				err = readErr
+			}
+			if err == nil {
+				err = w.prepareUsageDatabase(ctx, d.TenantID, design.Dynamic)
+			}
+		}
 		for _, args := range [][]string{{"init", "-input=false", "-no-color"}, {"apply", "-input=false", "-auto-approve", "-no-color"}} {
+			if err != nil {
+				break
+			}
 			if args[0] == "apply" {
 				if err = os.Remove(filepath.Join(dir, ".never-applied")); err != nil {
 					break
@@ -564,6 +609,18 @@ func (w *deploymentWorker) delete(rw http.ResponseWriter, id string, access depl
 	if d.Status != "ready" && d.Status != "failed" && d.Status != "cleanup_failed" {
 		jsonError(rw, 409, "worker_busy", "Only completed deployments can be deleted. Interrupted jobs require operator recovery.")
 		return
+	}
+	if w.dynamic == nil {
+		design, designErr := readBuilderDesign(dir)
+		if designErr != nil && !errors.Is(designErr, os.ErrNotExist) {
+			log.Printf("cleanup design lookup failed: %v", designErr)
+			jsonError(rw, 500, "storage_error", "Unable to inspect app data before cleanup; operator recovery is required.")
+			return
+		}
+		if designErr == nil && design.Dynamic != nil {
+			jsonError(rw, 503, "dynamic_unavailable", "Configure the app database before cleanup so managed records are not orphaned.")
+			return
+		}
 	}
 	lock := filepath.Join(w.root, ".worker.lock")
 	owner, err := os.ReadFile(lock)
@@ -672,6 +729,11 @@ func (w *deploymentWorker) destroy(dir string, d deployment) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		err = w.dynamicDeleteApp(ctx, d.ID)
+		cancel()
+	}
+	if err == nil {
 		err = os.RemoveAll(dir)
 	}
 	if err != nil {
@@ -754,6 +816,16 @@ func (w *deploymentWorker) list(rw http.ResponseWriter, access deploymentAccess)
 				return
 			}
 			d.CanEdit = access.CanCreate && d.Status == "ready" && designErr == nil
+			d.CanData = false
+			if w.dynamic != nil && access.CanDelete && d.Status == "ready" && designErr == nil {
+				design, err := readBuilderDesign(dir)
+				if err != nil {
+					log.Printf("dynamic design lookup failed: %v", err)
+					jsonError(rw, 500, "storage_error", "Unable to inspect dynamic app configuration.")
+					return
+				}
+				d.CanData = design.Dynamic != nil
+			}
 			if access.PaymentRequired {
 				d.URL = ""
 			}
@@ -832,6 +904,12 @@ func terraformVariables(req deploymentRequest, account, id string) ([]byte, erro
 			return nil, errors.New("Lead forms require a configured HTTPS public origin.")
 		}
 		content = renderPageBlocksWithForms(req.Blocks, catalog, strings.TrimRight(req.FormOrigin, "/")+"/forms/"+id)
+		if req.Dynamic != nil {
+			if !validFormOrigin(req.FormOrigin) {
+				return nil, errors.New("Dynamic apps require a configured HTTPS public origin.")
+			}
+			content += renderDynamicRuntime(req.FormOrigin, id)
+		}
 	}
 	css := `body{font-family:system-ui,sans-serif;max-width:48rem;margin:4rem auto;padding:0 1.5rem;color:#262a28}li{margin:.75rem 0}`
 	body := "<body>"
@@ -843,7 +921,11 @@ func terraformVariables(req deploymentRequest, account, id string) ([]byte, erro
 		}
 		body = `<body class="generated-site site-style-` + style + `">`
 	}
-	page := `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="icon" type="image/svg+xml" href="` + siteFaviconURL + `"><title>` + title +
+	policy := ""
+	if req.Dynamic != nil {
+		policy = dynamicContentPolicy(req.FormOrigin)
+	}
+	page := `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">` + policy + `<link rel="icon" type="image/svg+xml" href="` + siteFaviconURL + `"><title>` + title +
 		`</title><style>` + css + `</style></head>` + body + content + `</body></html>`
 	return json.MarshalIndent(map[string]string{
 		"account_id": account, "deployment_id": id, "region": req.Region, "page_html": page,

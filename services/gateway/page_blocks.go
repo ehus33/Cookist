@@ -10,14 +10,15 @@ import (
 )
 
 type pageBlock struct {
-	ID     string `json:"id"`
-	Type   string `json:"type"`
-	Text   string `json:"text"`
-	URL    string `json:"url"`
-	Alt    string `json:"alt"`
-	Align  string `json:"align"`
-	Size   string `json:"size"`
-	Beside bool   `json:"beside,omitempty"`
+	ID         string `json:"id"`
+	Type       string `json:"type"`
+	Text       string `json:"text"`
+	URL        string `json:"url"`
+	Alt        string `json:"alt"`
+	Align      string `json:"align"`
+	Size       string `json:"size"`
+	Beside     bool   `json:"beside,omitempty"`
+	Collection string `json:"collection,omitempty"`
 }
 
 var pageBlockIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
@@ -53,7 +54,7 @@ func validatePageBlocks(blocks []pageBlock) error {
 		}
 		ids[block.ID] = true
 		switch block.Type {
-		case "heading", "text", "button", "contact", "waitlist":
+		case "heading", "text", "button", "contact", "waitlist", "data-list", "data-form", "member-account":
 			if strings.TrimSpace(block.Text) == "" || (block.Type != "text" && len(block.Text) > 320) {
 				return fmt.Errorf("Element %d requires text within the allowed length.", i+1)
 			}
@@ -126,6 +127,9 @@ func renderPageBlocksWithForms(blocks []pageBlock, catalog, formBase string) str
 				content.WriteString(`<label>Message<textarea name="message" maxlength="2000" rows="4" required></textarea></label>`)
 			}
 			content.WriteString(`<label class="lead-honeypot" aria-hidden="true">Leave empty<input name="website" tabindex="-1" autocomplete="off"></label><label class="lead-consent"><input type="checkbox" name="consent" value="yes" required>I agree this business may contact me about my request.</label><button class="page-button" type="submit">` + map[bool]string{true: "Join waitlist", false: "Send message"}[block.Type == "waitlist"] + `</button></form>`)
+		case "data-list", "data-form", "member-account":
+			fmt.Fprintf(&content, `<section class="dynamic-widget" data-dynamic="%s" data-collection="%s"><h2>%s</h2><div class="dynamic-body"></div><p class="dynamic-status" role="status" aria-live="polite">Loading app...</p></section>`,
+				html.EscapeString(block.Type), html.EscapeString(block.Collection), text)
 		}
 		content.WriteString("</div>")
 		if i+1 == len(blocks) || !blocks[i+1].Beside {

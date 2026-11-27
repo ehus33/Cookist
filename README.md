@@ -127,6 +127,68 @@ Drafts use `GET`, `PUT`, and `DELETE /api/builder-draft`. Designs use
 `DELETE /api/deployments/{id}/submissions/{submissionId}`. All these API routes
 require authentication and enforce account/organization permissions.
 
+#### Dynamic member apps (optional)
+
+The hosted worker now runs a **controlled Stripe-test rollout** with an operator
+DynamoDB table and a separate non-production Cognito visitor pool/client. Real
+database CRUD and visitor sign-in, token verification and sign-out have been
+verified. Customer database checkout remains blocked until AWS cost attribution
+is ready. Static sites, storefronts and lead forms remain unchanged.
+
+Once configured and the customer has both a Cookist plan and the separate database
+add-on, enable **Dynamic data** in the builder's Data panel. Operator and explicit
+local-development accounts are billing-exempt:
+
+- Define up to eight collections with twelve fields each: text, email, number or
+  boolean. IDs are explicit stable keys; labels are customer-facing.
+- Choose who can read each collection: public visitors, signed-in members or only
+  the record's creator. Creation can be enabled for members; update and deletion
+  can be limited to the creator or disabled.
+- Add **Member account**, **Connected form** and **Connected list** elements.
+  Choose a collection in Element settings. Published lists include record detail
+  views with deep links and permitted version-checked edits/deletions.
+- Visitors sign up, confirm email, sign in, reset passwords and sign out through
+  the separate visitor directory. Its identity is shared across enabled apps,
+  but record access is scoped to the app and collection. These accounts never
+  grant Cookist deployment or billing access.
+- Owners and authorized deployment managers use **Data for [site name]** to
+  inspect, create, edit and delete records. Viewer roles cannot manage this data.
+  Preview controls never authenticate or read/write visitor records.
+
+Dynamic configuration is preserved in private drafts and saved published designs.
+Existing collection definitions and permissions cannot be changed or removed in
+this first release; new collections can be appended. This prevents silently
+reinterpreting or orphaning existing records. Each collection is capped at 1,000
+records, with paginated lists and optimistic-concurrency checks. Site cleanup
+must delete its managed records before removing its local design/state; failures
+retain recovery state. Deleting a site does not delete shared visitor accounts
+or the organization database/user pool. Organization storage continues costing
+money until its administrator explicitly deletes the database.
+
+**Operator setup:** the optional Terraform root at
+`services/gateway/terraform/dynamic` provisions the test table and visitor pool,
+not a database for every static site. Review its plan and AWS usage costs before
+applying. It uses account restrictions, encrypted table storage, point-in-time
+recovery, deletion protection and bounded on-demand throughput. Configure the
+four public identifiers from its `gateway_configuration` output in the gateway's
+private runtime environment:
+`COOKIST_DYNAMIC_REGION`, `COOKIST_DYNAMIC_TABLE`,
+`COOKIST_VISITOR_POOL_ID`, and `COOKIST_VISITOR_CLIENT_ID`.
+All four must be provided together, with a valid HTTPS `COOKIST_PUBLIC_ORIGIN`.
+The existing gateway role needs table-scoped data-plane access; never give
+visitors AWS credentials or grant the gateway administrative database/IAM access.
+The proxy must forward `/apps/` GET/POST/PATCH/DELETE/OPTIONS to the gateway,
+preserving authorization, JSON bodies and `If-Match`. The gateway accepts only
+the ready site's exact CloudFront Origin, including preflights.
+
+The test pool's server-side password flow has no MFA challenge UI. **This is not
+a production authentication configuration.** Before production, add managed
+login/MFA, production email delivery, edge abuse protection, monitoring/alerting,
+a privacy/retention policy and a tested restore procedure. Access tokens are
+short-lived; the browser does not receive refresh tokens. This release provides
+typed records and member CRUD, not relational joins, file uploads, booking
+conflict rules, automated workflows, carts or inventory/payment reconciliation.
+
 Choose **Visual builder** to open Cookist's Page studio. The left-hand Add elements
 sidebar has square icon tiles with visible labels; it stays within reach while
 scrolling on desktop and becomes a compact tile grid above the page on phones.
@@ -158,8 +220,9 @@ accepted. The gateway validates every element and escapes its content.
 This is a responsive block editor with at most two elements per row: it
 intentionally avoids overlapping absolute positioning. Pairs stack in reading
 order on screens up to 600px wide and in Phone preview. **Deploy site** publishes
-the current layout to a new S3/CloudFront site. Drafts remain only in the open
-form, not across page reloads. Existing deployments are not edited or replaced.
+the current layout to a new S3/CloudFront site. **Save draft** persists an explicit
+private draft across reloads. Supported saved builder designs can be reopened
+and published in place without replacing their infrastructure.
 Cookist's original implementation uses general interaction patterns described
 in [Wix's public element-editing documentation](https://support.wix.com/en/article/wix-editor-working-with-elements).
 That documentation was observed through REA; no signed-in Wix editor, proprietary
@@ -332,6 +395,98 @@ by installing this code.
    granted. Returning from Checkout is not evidence of payment: the existing
    permission polling displays access only after a verified webhook refreshes
    authoritative Stripe state. Owner and explicit local access remain exempt.
+
+#### Actual-cost database add-on
+
+This implementation is deployed in **Stripe test mode**, not live billing.
+Hosted sign-in and database-readiness gating have been verified. Cost Explorer
+is not yet enabled/accessible, and the `CookistTenant` and `CookistDatabase`
+cost-allocation tags still need activation. Customer database authorization
+remains unavailable until these prerequisites are ready; an actual AWS-cost
+import and Stripe usage invoice have not yet been verified. The test AWS
+resources are real and can incur AWS charges even though Stripe payments are
+simulated.
+Cookist hosts each organization's database in its own AWS account and pays AWS;
+customers need no AWS account. Their additional database bill is the actual
+AWS-reported, tenant-tagged DynamoDB USD cost multiplied by **1.9**, rounded once
+per calendar month to cents with exact decimal arithmetic. Reported $20 becomes
+$38; reported $30 becomes $57. There is no fixed database subscription price.
+
+- Set `COOKIST_DATABASE_COST_BILLING=true` only after configuring hosted Stripe
+  billing, the dynamic services and `COOKIST_AWS_ACCOUNT_ID`. Remove the old
+  `COOKIST_DATABASE_PRICE_ID`; startup rejects it to prevent accidental fixed-price
+  billing. Start in Stripe test mode. Keep the existing main-plan recurring price.
+- Each organization gets a deterministic, separately tagged on-demand DynamoDB
+  table. The operator keeps its original billing-exempt table. Test/live table
+  namespaces are distinct (`<operator-table>-test` or `-live`). Configure the
+  gateway in the same AWS region as DynamoDB to avoid cross-region database
+  transfer. The visitor directory remains shared and separate from owner login.
+- Enable Cost Explorer and activate the **CookistTenant** and **CookistDatabase**
+  cost-allocation tags using an operator identity before authorizations. Allow
+  time for AWS tag propagation and reported costs. The optional dynamic Terraform
+  root exports a scoped gateway IAM policy for table data/provisioning, tag
+  verification, PITR/deletion and Cost Explorer reads; review and attach it to
+  the gateway role. It does not activate tags or provision customer tables.
+  To regenerate the local SDK permission baseline without uploading policies:
+
+  ```powershell
+  uvx iam-policy-autopilot@latest generate-policies .\services\gateway\database_costs.go .\services\gateway\tenant_databases.go .\services\gateway\dynamic_store.go --region $env:COOKIST_DYNAMIC_REGION --account $env:COOKIST_AWS_ACCOUNT_ID --service-hints dynamodb ce --pretty
+  ```
+
+  Review the baseline: the Terraform policy scopes table/account access and
+  excludes optional replica, resource-policy and customer-managed KMS operations
+  that this implementation does not perform.
+- The meter filters `Amazon DynamoDB`, the configured account and database
+  namespace, grouping `NetUnblendedCost` by organization. It includes attributable
+  table/index/backup costs and tagged discounts/credits, **not the entire AWS
+  account bill**. Untagged transfer, Cognito, EC2, CloudFront, Cost Explorer API
+  fees, account-wide unallocated credits, taxes and support are outside this
+  database meter. DynamoDB transfer is not allocated by table tags; no guessed
+  per-customer allocation or request-count price is substituted.
+- Billing is in arrears after a seven-day settlement wait and only from
+  non-estimated, USD, correctly attributed closed-month reports. Missing tenant
+  rows, inactive tags and API errors are explicit failures, not free/zero-cost
+  defaults. Reported zero costs create no Stripe charge. Throughput/record
+  limits are safeguards, not a global AWS spending cap.
+- The daily worker backfills missing months (at most twelve Cost Explorer
+  reports per run), checks the most recent three completed months for corrections
+  on Mondays, and recovers stored unfinished invoice operations. Settled ancient
+  months are not repeatedly queried. The operator can explicitly reimport any
+  available closed month with authenticated POST
+  `/api/billing/database/reconcile`, body `{"period":"YYYY-MM"}`. Older data outside
+  AWS's enabled retention fails explicitly and requires operator investigation;
+  the worker never invents costs for it.
+- Customer administrators explicitly authorize variable off-session card
+  charges through Stripe **setup** Checkout. No upfront charge or recurring
+  database product is created. Returning from Checkout does not grant access;
+  current Session, SetupIntent, payment-method ownership, tenant metadata and
+  test/live mode must all be verified. Deployer/viewer roles cannot authorize
+  or delete the organization database. The portal can update payment methods.
+- Durable per-tenant/month ledgers precede remote invoice operations. Exact
+  non-discountable invoice items are isolated from unrelated pending items,
+  verified before finalization/payment and recovered by persisted metadata
+  even after Stripe idempotency keys expire. Positive corrections charge only
+  the difference. Lower reports void/replace unpaid overstated invoices;
+  reductions to paid amounts produce future Stripe customer-balance credits,
+  not automatic cash refunds. Do not manually edit these managed invoices.
+- Failed/SCA-required database payments pause visitor data access and customer
+  writes, not the main Cookist plan. Use the hosted invoice link to resolve
+  payment. Owner reads/deletes and cleanup remain available. Main-plan expiry
+  does not terminate the database agreement or its storage charges; publishing
+  requires both main-plan access and database authorization.
+- **Deleting a site is not deleting its database.** Retained databases continue
+  incurring actual storage costs. The administrator's separate
+  `/api/billing/database/delete` action requires the exact confirmation
+  `{"confirmation":"DELETE DATABASE"}`. It removes all organization records across
+  apps, pauses published dynamic features and stops managed-table charges after
+  AWS confirms deletion. Designs and shared visitor accounts remain. AWS can
+  retain a system backup for 35 days without additional backup charges; this is
+  not a promise of immediate physical backup erasure. Already-incurred costs and
+  later corrections still bill after deletion. Failed deletions retain recovery
+  state and are resumed by the worker.
+- Existing shared customer data is never silently switched into dedicated
+  tables: enabling actual-cost mode requires explicit migration first. Merely
+  installing/building this source provisions nothing and charges nobody.
 
 **Private hosting caveat:** the existing Tailscale-private site cannot receive
 Stripe's public webhook delivery. Live billing is not ready until a separately

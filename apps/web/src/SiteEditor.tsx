@@ -4,6 +4,7 @@ import { blockRows, blockTypes, insertBlock, isSafeWebURL, moveBlock, newBlock, 
 import type { BlockType, PageBlock } from './pageBlocks';
 import { newStartupSection, startupSections } from './startupSections';
 import type { StartupSectionId } from './startupSections';
+import type { DynamicConfig } from './dynamicApps';
 
 const dragFormat = 'application/x-cookist-element';
 const elementIcons: Record<BlockType, ReactNode> = {
@@ -16,14 +17,18 @@ const elementIcons: Record<BlockType, ReactNode> = {
   products: <><path d="M5 7h14l2 14H3L5 7Z" /><path d="M8 9V6a4 4 0 0 1 8 0v3" /></>,
   contact: <><rect x="3" y="5" width="18" height="14" rx="2" /><path d="m3 6 9 7 9-7" /></>,
   waitlist: <><path d="M5 5h9M5 10h9M5 15h5M18 12v8m-4-4h8" /></>,
+  'data-list': <><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M7 7h10M7 12h10M7 17h10" /></>,
+  'data-form': <><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M7 7h10M7 11h10M7 16h5" /></>,
+  'member-account': <><circle cx="12" cy="8" r="4" /><path d="M4 21v-2a8 8 0 0 1 16 0v2" /></>,
 };
 
-export function SiteEditor({ blocks, onChange, style, disabled, catalog }: {
+export function SiteEditor({ blocks, onChange, style, disabled, catalog, dynamic }: {
   blocks: PageBlock[];
   onChange: (blocks: PageBlock[]) => void;
   style: string;
   disabled: boolean;
   catalog: ReactNode;
+  dynamic?: DynamicConfig;
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [mobile, setMobile] = useState(false);
@@ -51,6 +56,7 @@ export function SiteEditor({ blocks, onChange, style, disabled, catalog }: {
   function add(type: BlockType, index = blocks.length, beside?: { id: string; side: 'left' | 'right' }) {
     if (blocks.length >= 40 || (type === 'products' && blocks.some(block => block.type === 'products'))) return;
     const block = newBlock(type);
+    if (type === 'data-list' || type === 'data-form') block.collection = dynamic?.collections[0]?.id ?? '';
     const next = beside ? placeBeside(blocks, block, beside.id, beside.side) : insertBlock(blocks, block, index);
     if (next === blocks) return;
     commit(next, `${blockTypes.find(item => item.type === type)?.label} added at position ${index + 1}.`);
@@ -87,7 +93,7 @@ export function SiteEditor({ blocks, onChange, style, disabled, catalog }: {
     } else if (value.type) add(value.type, index, beside);
   }
 
-  function change(field: 'text' | 'url' | 'alt' | 'align' | 'size', value: string) {
+  function change(field: 'text' | 'url' | 'alt' | 'align' | 'size' | 'collection', value: string) {
     if (!selected) return;
     const next = { ...selected };
     if (field === 'align') {
@@ -130,6 +136,15 @@ export function SiteEditor({ blocks, onChange, style, disabled, catalog }: {
         <p>Visitors give contact consent. Submissions appear in this site's private inbox after publishing.</p>
         <button type="button" className="page-button" disabled>{block.type === 'waitlist' ? 'Join waitlist' : 'Send message'}</button>
       </div>;
+      case 'member-account': return <div className="dynamic-widget"><h2>{block.text}</h2><p>Visitors can sign up, confirm their email and sign in. Preview never authenticates.</p><button type="button" disabled>Sign in</button></div>;
+      case 'data-form':
+      case 'data-list': {
+        const collection = dynamic?.collections.find(item => item.id === block.collection);
+        return <div className="dynamic-widget"><h2>{block.text}</h2><p>{collection ? `Connected to ${collection.name}` : 'Select a collection in element settings.'}</p>
+          {block.type === 'data-form' ? collection?.fields.map(field => <label key={field.id}>{field.label}<input disabled placeholder={field.type} /></label>)
+            : <p>Live records, detail views and permitted edits appear here after publishing.</p>}
+          <p>Preview uses no visitor data and does not save records.</p></div>;
+      }
     }
   }
 
@@ -150,7 +165,7 @@ export function SiteEditor({ blocks, onChange, style, disabled, catalog }: {
         <h5>Add elements</h5>
         <p className="builder-palette-hint">Drag onto your page or click to add.</p>
         <div className="builder-palette-grid">
-          {blockTypes.map(item => <button key={item.type} type="button" className="builder-palette-tile" draggable={!disabled}
+          {blockTypes.filter(item => dynamic || !['data-list', 'data-form', 'member-account'].includes(item.type)).map(item => <button key={item.type} type="button" className="builder-palette-tile" draggable={!disabled}
             disabled={disabled || blocks.length >= 40 || (item.type === 'products' && blocks.some(block => block.type === 'products'))}
             onDragStart={event => startDrag(event, { type: item.type })} onDragEnd={() => { drag.current = null; setDropTarget(null); }}
             onClick={() => add(item.type, blocks.length, canInsertBeside && selected && placement !== 'row' ? { id: selected.id, side: placement } : undefined)} aria-label={`Add ${item.label}`}>
@@ -222,11 +237,15 @@ export function SiteEditor({ blocks, onChange, style, disabled, catalog }: {
         <h5>Element settings</h5>
         {!selected ? <p>Select an element on the page.</p> : <fieldset disabled={disabled}>
           <legend>{blockTypes.find(item => item.type === selected.type)?.label}</legend>
-          {['heading', 'text', 'button', 'contact', 'waitlist'].includes(selected.type) && <label>Element text<textarea rows={4} maxLength={selected.type === 'text' ? 2000 : 80}
+          {['heading', 'text', 'button', 'contact', 'waitlist', 'data-list', 'data-form', 'member-account'].includes(selected.type) && <label>Element text<textarea rows={4} maxLength={selected.type === 'text' ? 2000 : 80}
             value={selected.text} onChange={event => change('text', event.target.value)} /></label>}
           {(selected.type === 'image' || selected.type === 'button') && <label>{selected.type === 'image' ? 'Image URL' : 'Button URL'}<input type="url" maxLength={2000}
             placeholder="https://..." value={selected.url} onChange={event => change('url', event.target.value)} /></label>}
           {selected.type === 'image' && <label>Image alternative text<input maxLength={160} value={selected.alt} onChange={event => change('alt', event.target.value)} /></label>}
+          {(selected.type === 'data-list' || selected.type === 'data-form') && <label>Data collection<select value={selected.collection ?? ''} onChange={event => change('collection', event.target.value)}>
+            <option value="">Select a collection</option>
+            {dynamic?.collections.map(collection => <option key={collection.id} value={collection.id}>{collection.name}</option>)}
+          </select></label>}
           {selected.type === 'products' ? <p>Edit products in the catalog fields. The deployed buttons use your own Stripe Payment Links.</p> : <>
             <label>Alignment<select value={selected.align} onChange={event => change('align', event.target.value)}>
               <option value="left">Left</option><option value="center">Center</option><option value="right">Right</option>

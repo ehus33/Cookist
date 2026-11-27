@@ -1,5 +1,23 @@
 # @cookist/web
 
+## 1.8.2
+
+### Patch Changes
+
+- Add optional dynamic member apps with data collections, separate visitor accounts, connected forms and lists with record details, access rules, and owner data management. Dynamic apps require a configured managed database and visitor identity service; existing static sites remain unchanged.
+
+## 1.8.1
+
+### Patch Changes
+
+- Add a separate, operator-priced monthly database subscription with trusted Stripe checkout, independent verified entitlements, starter limits, and data recovery after expiry. No automatic AWS-cost metering or live provisioning is included.
+
+## 1.8.0
+
+### Minor Changes
+
+- fc75021: Add private account-scoped builder drafts, safe HTML-only republishing of saved builder sites, reusable startup sections, and working contact/waitlist forms with a tenant-protected submission inbox, consent, honeypot protection, rate limits and bounded storage.
+
 ## 1.7.2
 
 ### Patch Changes

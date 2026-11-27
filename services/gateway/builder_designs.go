@@ -120,6 +120,9 @@ func validateBuilderDraft(req deploymentRequest) error {
 	if len(req.Blocks) > 40 || len(req.Products) > 20 || len(req.DraftProducts) > 20 {
 		return errors.New("Drafts allow at most 40 elements and 20 products.")
 	}
+	if err := validateDynamicConfig(req.Dynamic); err != nil {
+		return err
+	}
 	ids := map[string]bool{}
 	catalogs := 0
 	for i, block := range req.Blocks {
@@ -129,12 +132,12 @@ func validateBuilderDraft(req deploymentRequest) error {
 		if !pageBlockIDPattern.MatchString(block.ID) || ids[block.ID] ||
 			(block.Align != "left" && block.Align != "center" && block.Align != "right") ||
 			(block.Size != "small" && block.Size != "medium" && block.Size != "large") ||
-			len(block.Text) > 8000 || len(block.URL) > 2000 || len(block.Alt) > 640 {
+			len(block.Text) > 8000 || len(block.URL) > 2000 || len(block.Alt) > 640 || len(block.Collection) > 32 {
 			return fmt.Errorf("Element %d has invalid draft settings.", i+1)
 		}
 		ids[block.ID] = true
 		switch block.Type {
-		case "heading", "button", "contact", "waitlist":
+		case "heading", "button", "contact", "waitlist", "data-list", "data-form", "member-account":
 			if len(block.Text) > 320 {
 				return fmt.Errorf("Element %d text exceeds the allowed length.", i+1)
 			}
@@ -405,6 +408,17 @@ func (w *deploymentWorker) builderDeploymentDesign(rw http.ResponseWriter, r *ht
 		return
 	}
 	req.FormOrigin = w.publicOrigin
+	if err := validateDynamicUpdate(saved.Dynamic, req.Dynamic); err != nil {
+		jsonError(rw, 409, "immutable_collections", err.Error())
+		return
+	}
+	if req.Dynamic != nil && (w.dynamic == nil || !validFormOrigin(w.publicOrigin)) {
+		jsonError(rw, 503, "dynamic_unavailable", "Dynamic apps require configured database and visitor authentication.")
+		return
+	}
+	if req.Dynamic != nil && !w.requireDatabase(rw, access.TenantID) {
+		return
+	}
 	variables, err := terraformVariables(req, w.account, id)
 	if err != nil {
 		jsonError(rw, 400, "invalid_request", err.Error())
@@ -564,6 +578,10 @@ func (w *deploymentWorker) runBuilderUpdate(dir string, original deployment, req
 		}
 		stage = "validate"
 		if err := validateBuilderPlan(plan); err != nil {
+			return err
+		}
+		stage = "database"
+		if err := w.prepareUsageDatabase(ctx, original.TenantID, req.Dynamic); err != nil {
 			return err
 		}
 		stage, uncertain = "apply", true

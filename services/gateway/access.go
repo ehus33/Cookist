@@ -33,17 +33,21 @@ type accessPolicy struct {
 }
 
 type deploymentAccess struct {
-	ActorID          string `json:"-"`
-	TenantID         string `json:"tenantId,omitempty"`
-	Role             string `json:"role"`
-	Subscribed       bool   `json:"subscribed"`
-	Limit            int    `json:"deploymentLimit"`
-	CanList          bool   `json:"canList"`
-	CanCreate        bool   `json:"canCreate"`
-	CanDelete        bool   `json:"canDelete"`
-	PaymentRequired  bool   `json:"paymentRequired"`
-	CanCheckout      bool   `json:"canCheckout"`
-	CanManageBilling bool   `json:"canManageBilling"`
+	ActorID                  string `json:"-"`
+	TenantID                 string `json:"tenantId,omitempty"`
+	Role                     string `json:"role"`
+	Subscribed               bool   `json:"subscribed"`
+	Limit                    int    `json:"deploymentLimit"`
+	CanList                  bool   `json:"canList"`
+	CanCreate                bool   `json:"canCreate"`
+	CanDelete                bool   `json:"canDelete"`
+	PaymentRequired          bool   `json:"paymentRequired"`
+	CanCheckout              bool   `json:"canCheckout"`
+	CanManageBilling         bool   `json:"canManageBilling"`
+	DynamicEnabled           bool   `json:"dynamicEnabled,omitempty"`
+	CanUseDynamic            bool   `json:"canUseDynamic,omitempty"`
+	DatabaseSubscribed       bool   `json:"databaseSubscribed,omitempty"`
+	DatabaseBillingAvailable bool   `json:"databaseBillingAvailable,omitempty"`
 }
 
 var tenantPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
@@ -136,7 +140,7 @@ func (w *deploymentWorker) accessFor(actor string) (deploymentAccess, error) {
 	access := deploymentAccess{ActorID: actor, Role: "none", PaymentRequired: !w.localAccess}
 	if actor == w.owner {
 		return deploymentAccess{ActorID: actor, TenantID: "owner", Role: "platform_owner",
-			Subscribed: true, Limit: maxTestDeployments, CanList: true, CanCreate: true, CanDelete: true}, nil
+			Subscribed: true, Limit: maxTestDeployments, CanList: true, CanCreate: true, CanDelete: true, CanUseDynamic: w.dynamic != nil, DatabaseSubscribed: true}, nil
 	}
 	member, ok := policy.Members[actor]
 	var tenant accessTenant
@@ -176,11 +180,16 @@ func (w *deploymentWorker) accessFor(actor string) (deploymentAccess, error) {
 		canCheckout = member.Role == "customer_admin" && !record.HasSubscription
 		canManageBilling = member.Role == "customer_admin" && record.CustomerID != ""
 	}
+	databasePaid, err := w.databaseEntitled(member.TenantID)
+	if err != nil {
+		return deploymentAccess{}, err
+	}
 	return deploymentAccess{ActorID: actor, TenantID: member.TenantID, Role: member.Role,
 		Subscribed: subscribed, Limit: tenant.DeploymentLimit, CanList: true,
 		CanCreate: canManage && (subscribed || w.localAccess), CanDelete: canManage,
 		PaymentRequired: !subscribed && !w.localAccess,
-		CanCheckout:     canCheckout, CanManageBilling: canManageBilling}, nil
+		CanCheckout:     canCheckout, CanManageBilling: canManageBilling,
+		DatabaseSubscribed: databasePaid, CanUseDynamic: w.dynamic != nil && canManage && (subscribed || w.localAccess) && databasePaid}, nil
 }
 
 func (a deploymentAccess) check(action string, d *deployment) error {

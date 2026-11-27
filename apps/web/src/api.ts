@@ -17,9 +17,10 @@ function isErrorBody(value: unknown): value is { error: { message: string } } {
 
 export async function api<T>(
   path: string, session: Session | null = null,
-  options: { method?: string; body?: object; signal?: AbortSignal } = {},
+  options: { method?: string; body?: object; signal?: AbortSignal; headers?: { 'If-Match'?: string } } = {},
 ): Promise<T> {
   const headers: Record<string, string> = { Accept: 'application/json' };
+  if (options.headers?.['If-Match']) headers['If-Match'] = options.headers['If-Match'];
   if (session) headers.Authorization = `Bearer ${session.token}`;
   if (options.body) headers['Content-Type'] = 'application/json';
   const response = await fetch(path, {

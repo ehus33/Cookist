@@ -111,3 +111,68 @@ it('loads an existing builder site and publishes changes through PATCH without c
   })));
   expect(api).not.toHaveBeenCalledWith('/api/deployments', session, expect.objectContaining({ method: 'POST' }));
 });
+
+it('retains dynamic collections through drafts and binds connected elements when publishing an existing app', async () => {
+    const id = 'b'.repeat(32);
+    const dynamic = { collections: [{ id: 'requests', name: 'Requests', read: 'own', create: 'members', update: 'own', delete: 'own',
+      fields: [{ id: 'title', label: 'Request title', type: 'text', required: true }] }] };
+    const site = { id, name: 'Member portal', region: 'us-west-2', status: 'ready', canEdit: true };
+    const design = { name: site.name, region: site.region, template: 'builder', style: 'modern', businessName: '', listTitle: '', items: '',
+      dynamic, blocks: [{ id: 'intro', type: 'heading', text: 'Welcome', url: '', alt: '', align: 'left', size: 'medium' }] };
+    const api = vi.spyOn(apiModule, 'api').mockImplementation(async (path, _session, options) => {
+      if (path === '/api/deployment-access') return { ...ownerAccess, dynamicEnabled: true, canUseDynamic: true };
+      if (path === '/api/builder-draft') return { draft: options?.body };
+      if (path === `/api/deployments/${id}/design`) return options?.method === 'PATCH' ? { ...site, status: 'running' } : design;
+      return [site];
+    });
+
+    render(<App authenticatedSession={session} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit Member portal' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Add Member account' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add Connected form' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add Connected list' }));
+    expect(screen.getByLabelText('Data collection')).toHaveValue('requests');
+    expect(screen.getByRole('region', { name: 'Page canvas' }).querySelector('form')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
+    await waitFor(() => expect(api).toHaveBeenCalledWith('/api/builder-draft', session, expect.objectContaining({
+      method: 'PUT', body: expect.objectContaining({ dynamic, draftDeploymentId: id }),
+    })));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Publish changes' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Publish changes' }));
+    await waitFor(() => expect(api).toHaveBeenCalledWith(`/api/deployments/${id}/design`, session, expect.objectContaining({
+      method: 'PATCH', body: expect.objectContaining({ dynamic, blocks: [
+        expect.objectContaining({ type: 'heading' }),
+        expect.objectContaining({ type: 'member-account' }),
+        expect.objectContaining({ type: 'data-form', collection: 'requests' }),
+        expect.objectContaining({ type: 'data-list', collection: 'requests' }),
+      ] }),
+    })));
+});
+
+it.each([false, true])('requires explicit paid database access in the builder (paid=%s)', async paid => {
+  const customerSession = { token: 'customer-token', actorId: 'admin' };
+  vi.spyOn(apiModule, 'api').mockImplementation(async path => {
+    if (path === '/api/deployment-access') return { ...ownerAccess, role: 'customer_admin',
+      dynamicEnabled: true, databaseBillingAvailable: true, canUseDynamic: paid, databaseSubscribed: paid };
+    if (path === '/api/billing/database') return {
+      configured: true, serviceReady: true, subscribed: paid, hasSubscription: paid,
+      canCheckout: !paid, canManageBilling: true, mode: 'test',
+      billingModel: 'aws-cost-markup', multiplier: '1.9', currency: 'usd',
+      databaseState: paid ? 'retained' : 'not_created', canDeleteDatabase: paid, invoices: [],
+    };
+    return [];
+  });
+  render(<App authenticatedSession={customerSession} />);
+  await screen.findByRole('region', { name: 'Database add-on' });
+  await screen.findByText(/prior calendar month's actual AWS-tagged DynamoDB cost/);
+  fireEvent.click(await screen.findByRole('button', { name: 'New deployment' }));
+  fireEvent.click(screen.getByRole('radio', { name: /Visual builder/ }));
+  const enable = screen.getByRole('checkbox', { name: 'Enable data and member accounts' });
+  if (paid) {
+    expect(enable).toBeEnabled();
+    expect(screen.queryByRole('button', { name: 'Authorize database billing' })).not.toBeInTheDocument();
+  } else {
+    expect(enable).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Authorize database billing' })).toBeDisabled();
+  }
+});

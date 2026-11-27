@@ -15,11 +15,12 @@ import (
 )
 
 type stripeFixture struct {
-	mu              sync.Mutex
-	subscriptions   []any
-	checkouts       int
-	creationKey     string
-	checkoutFailure bool
+	mu                    sync.Mutex
+	subscriptions         []any
+	checkouts             int
+	creationKey           string
+	checkoutFailure       bool
+	databasePriceResponse string
 }
 
 func billingWorker(t *testing.T) (*deploymentWorker, *stripeFixture) {
@@ -40,6 +41,12 @@ func billingWorker(t *testing.T) (*deploymentWorker, *stripeFixture) {
 		switch r.Method + " " + r.URL.Path {
 		case "GET /v1/prices/price_test":
 			_, _ = rw.Write([]byte(`{"id":"price_test","active":true,"livemode":false,"recurring":{"usage_type":"licensed","interval":"month"}}`))
+		case "GET /v1/prices/price_database":
+			response := fixture.databasePriceResponse
+			if response == "" {
+				response = `{"id":"price_database","active":true,"livemode":false,"currency":"usd","unit_amount":3800,"billing_scheme":"per_unit","recurring":{"usage_type":"licensed","interval":"month","interval_count":1}}`
+			}
+			_, _ = rw.Write([]byte(response))
 		case "POST /v1/customers":
 			if r.Form.Get("metadata[CookistTenant]") != "alpha" || r.Header.Get("Idempotency-Key") == "" {
 				t.Error("customer creation lacks trusted tenant or idempotency key")
@@ -60,16 +67,29 @@ func billingWorker(t *testing.T) (*deploymentWorker, *stripeFixture) {
 				_, _ = rw.Write([]byte(`{"error":{"type":"api_error","message":"unavailable"}}`))
 				return
 			}
+			price := "price_test"
+			if r.Form.Get("metadata[CookistPlan]") == "database" {
+				price = "price_database"
+				if r.Form.Get("subscription_data[metadata][CookistPlan]") != "database" {
+					t.Error("database subscription is missing its plan metadata")
+				}
+			}
 			for key, want := range map[string]string{
 				"mode": "subscription", "customer": "cus_alpha", "client_reference_id": "alpha",
-				"line_items[0][price]": "price_test", "line_items[0][quantity]": "1",
+				"line_items[0][price]": price, "line_items[0][quantity]": "1",
 				"subscription_data[metadata][CookistTenant]": "alpha", "success_url": "https://cookist.example/?billing=returned",
 			} {
 				if got := r.Form.Get(key); got != want {
 					t.Errorf("%s=%s, want %s", key, got, want)
 				}
 			}
-			_, _ = rw.Write([]byte(`{"id":"cs_test","status":"open","url":"https://checkout.stripe.com/c/pay/test","livemode":false}`))
+			if price == "price_database" {
+				_, _ = rw.Write([]byte(`{"id":"cs_database","customer":"cus_alpha","status":"open","url":"https://checkout.stripe.com/c/pay/database","livemode":false}`))
+			} else {
+				_, _ = rw.Write([]byte(`{"id":"cs_test","status":"open","url":"https://checkout.stripe.com/c/pay/test","livemode":false}`))
+			}
+		case "GET /v1/checkout/sessions/cs_database":
+			_, _ = rw.Write([]byte(`{"id":"cs_database","customer":"cus_alpha","status":"open","url":"https://checkout.stripe.com/c/pay/database","livemode":false}`))
 		case "GET /v1/checkout/sessions/cs_test":
 			_, _ = rw.Write([]byte(`{"id":"cs_test","status":"open","url":"https://checkout.stripe.com/c/pay/test","livemode":false}`))
 		case "POST /v1/billing_portal/sessions":

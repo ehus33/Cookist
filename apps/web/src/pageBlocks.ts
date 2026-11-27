@@ -1,4 +1,4 @@
-export type BlockType = 'heading' | 'text' | 'image' | 'button' | 'divider' | 'spacer' | 'products' | 'contact' | 'waitlist';
+export type BlockType = 'heading' | 'text' | 'image' | 'button' | 'divider' | 'spacer' | 'products' | 'contact' | 'waitlist' | 'data-list' | 'data-form' | 'member-account';
 export type PageBlock = {
   id: string;
   type: BlockType;
@@ -8,6 +8,7 @@ export type PageBlock = {
   align: 'left' | 'center' | 'right';
   size: 'small' | 'medium' | 'large';
   beside?: boolean;
+  collection?: string;
 };
 
 export const blockTypes: { type: BlockType; label: string }[] = [
@@ -20,11 +21,14 @@ export const blockTypes: { type: BlockType; label: string }[] = [
   { type: 'products', label: 'Product catalog' },
   { type: 'contact', label: 'Contact form' },
   { type: 'waitlist', label: 'Waitlist form' },
+  { type: 'member-account', label: 'Member account' },
+  { type: 'data-list', label: 'Connected list' },
+  { type: 'data-form', label: 'Connected form' },
 ];
 
 export function newBlock(type: BlockType): PageBlock {
   return {
-    id: crypto.randomUUID(), type, text: type === 'contact' ? 'Contact us' : type === 'waitlist' ? 'Join our waitlist' : type === 'heading' ? 'Your next big idea' : type === 'text'
+    id: crypto.randomUUID(), type, text: type === 'member-account' ? 'Member area' : type === 'data-list' ? 'Your records' : type === 'data-form' ? 'Create a record' : type === 'contact' ? 'Contact us' : type === 'waitlist' ? 'Join our waitlist' : type === 'heading' ? 'Your next big idea' : type === 'text'
       ? 'Tell your customers what makes you different.' : type === 'button' ? 'Learn more' : '',
     url: '', alt: '', align: 'left', size: 'medium',
   };
@@ -40,15 +44,21 @@ export function isSafeWebURL(value: string): boolean {
   }
 }
 
-export function blockError(blocks: PageBlock[]): string | null {
+export function blockError(blocks: PageBlock[], collections?: { id: string }[]): string | null {
   if (blocks.length < 1 || blocks.length > 40) return 'Add between 1 and 40 elements to your page.';
   if (blocks.filter(block => block.type === 'products').length > 1) return 'Use only one product catalog per page.';
   for (const [index, block] of blocks.entries()) {
     if (block.beside && (index === 0 || blocks[index - 1].beside)) {
       return 'A row can contain at most two elements.';
     }
-    if (['heading', 'text', 'button', 'contact', 'waitlist'].includes(block.type) && !block.text.trim()) {
+    if (['heading', 'text', 'button', 'contact', 'waitlist', 'data-list', 'data-form', 'member-account'].includes(block.type) && !block.text.trim()) {
       return `Element ${index + 1} needs text.`;
+    }
+    if (['data-list', 'data-form', 'member-account'].includes(block.type) && !collections?.length) {
+      return 'Enable dynamic data before publishing connected elements.';
+    }
+    if ((block.type === 'data-list' || block.type === 'data-form') && !collections?.some(item => item.id === block.collection)) {
+      return `Element ${index + 1} needs a data collection.`;
     }
 
     if ((block.type === 'button' || block.type === 'image') && !isSafeWebURL(block.url)) {
@@ -69,7 +79,8 @@ export function isPageBlock(value: unknown): value is PageBlock {
     && typeof block.alt === 'string' && block.alt.length <= 640
     && (block.align === 'left' || block.align === 'center' || block.align === 'right')
     && (block.size === 'small' || block.size === 'medium' || block.size === 'large')
-    && (block.beside === undefined || typeof block.beside === 'boolean');
+    && (block.beside === undefined || typeof block.beside === 'boolean')
+    && (block.collection === undefined || (typeof block.collection === 'string' && block.collection.length <= 32));
 }
 
 export function moveBlock(blocks: PageBlock[], id: string, beforeIndex: number): PageBlock[] {

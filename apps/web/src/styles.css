@@ -25,6 +25,9 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px
 .deployment-list { display: grid; gap: 12px; padding: 0; margin: 24px 0; list-style: none; }
 .deployment-list li { display: grid; gap: 5px; padding: 12px; border: 1px solid #dfe1da; border-radius: 8px; }
 .deployment-list span, .deployment-list small { color: #64675c; }
+.workspace .database-billing { margin-top: 24px; padding: 18px; border: 1px solid #dfe1da; }
+.database-billing h3 { margin-top: 0; }
+.database-billing button { margin: 0 8px 8px 0; }
 .deployment-form { display: grid; gap: 18px; margin-top: 32px; }
 .deployment-form h3, .deployment-form p { margin: 0; }
 .deployment-form label:not(.template-choice) { display: grid; gap: 7px; font-weight: 600; }
@@ -145,4 +148,33 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px
   .site-preview.generated-site { padding: 20px; }
   .builder-stage { padding: 4px; }
   .builder-canvas.generated-site { padding: 12px; }
+}
+.dynamic-data-panel {
+  padding: 1rem;
+  margin-block: 1rem;
+  border: 1px solid #d8ddd9;
+  border-radius: 12px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.dynamic-data-panel fieldset {
+  min-width: 0;
+  margin-block: .75rem;
+}
+.dynamic-data-panel label {
+  display: grid;
+  gap: .35rem;
+  margin-block: .65rem;
+}
+.dynamic-data-panel input,
+.dynamic-data-panel select {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+.dynamic-data-panel button {
+  margin: .25rem;
+}
+.dynamic-data-panel ul {
+  padding-left: 1.25rem;
 }

@@ -5,6 +5,11 @@ import type { Session } from './types';
 import { SiteEditor } from './SiteEditor';
 import { blockError, isPageBlock } from './pageBlocks';
 import type { PageBlock } from './pageBlocks';
+import { DynamicEditor } from './DynamicEditor';
+import { DatabaseBilling } from './DatabaseBilling';
+import { DynamicAdmin } from './DynamicAdmin';
+import { dynamicError, isDynamicConfig } from './dynamicApps';
+import type { DynamicConfig } from './dynamicApps';
 import '../../../services/gateway/site_styles.css';
 
 type DeploymentTemplate = 'blank' | 'business' | 'storefront' | 'builder';
@@ -32,8 +37,8 @@ const siteStyles: { id: SiteStyle; name: string; description: string }[] = [
 function isSiteStyle(value: unknown): value is SiteStyle {
   return siteStyles.some(style => style.id === value);
 }
-type Deployment = { id: string; name: string; region: string; status: 'running' | 'ready' | 'failed' | 'deleting' | 'cleanup_failed'; url?: string; style?: SiteStyle; canEdit?: boolean; lastUpdateError?: string };
-type BuilderDesign = { name: string; region: string; template: 'builder'; style: SiteStyle; businessName: string; listTitle: string; items: string; blocks: PageBlock[]; products?: StoreProduct[]; draftProducts?: Omit<ProductDraft, 'id'>[]; draftDeploymentId?: string };
+type Deployment = { id: string; name: string; region: string; status: 'running' | 'ready' | 'failed' | 'deleting' | 'cleanup_failed'; url?: string; style?: SiteStyle; canEdit?: boolean; canData?: boolean; lastUpdateError?: string };
+type BuilderDesign = { name: string; region: string; template: 'builder'; style: SiteStyle; businessName: string; listTitle: string; items: string; blocks: PageBlock[]; products?: StoreProduct[]; draftProducts?: Omit<ProductDraft, 'id'>[]; draftDeploymentId?: string; dynamic?: DynamicConfig };
 type Lead = { id: string; formId: string; kind: string; name: string; email: string; message: string; createdAt: string };
 function isLead(value: unknown): value is Lead {
   if (!value || typeof value !== 'object') return false;
@@ -45,6 +50,7 @@ function isBuilderDesign(value: unknown): value is BuilderDesign {
   const design = value as Record<string, unknown>;
   return ['name', 'region', 'businessName', 'listTitle', 'items'].every(key => typeof design[key] === 'string')
     && design.template === 'builder' && isSiteStyle(design.style)
+    && (design.dynamic === undefined || isDynamicConfig(design.dynamic))
     && (design.draftDeploymentId === undefined || (typeof design.draftDeploymentId === 'string' && /^[a-f0-9]{32}$/.test(design.draftDeploymentId)))
     && Array.isArray(design.blocks) && design.blocks.length <= 40 && design.blocks.every(isPageBlock)
     && (design.products === undefined || (Array.isArray(design.products) && design.products.every(product =>
@@ -53,7 +59,7 @@ function isBuilderDesign(value: unknown): value is BuilderDesign {
     && (design.draftProducts === undefined || (Array.isArray(design.draftProducts) && design.draftProducts.every(product =>
       product && typeof product === 'object' && ['name', 'description', 'price', 'paymentLink'].every(key => typeof product[key] === 'string'))));
 }
-type DeploymentAccess = { role: string; subscribed: boolean; paymentRequired: boolean; canList: boolean; canCreate: boolean; canDelete: boolean; canCheckout?: boolean; canManageBilling?: boolean };
+type DeploymentAccess = { role: string; subscribed: boolean; paymentRequired: boolean; canList: boolean; canCreate: boolean; canDelete: boolean; canCheckout?: boolean; canManageBilling?: boolean; dynamicEnabled?: boolean; canUseDynamic?: boolean; databaseSubscribed?: boolean; databaseBillingAvailable?: boolean };
 
 function isDeploymentAccess(value: unknown): value is DeploymentAccess {
   if (!value || typeof value !== 'object') return false;
@@ -64,7 +70,11 @@ function isDeploymentAccess(value: unknown): value is DeploymentAccess {
     && typeof access.canCreate === 'boolean' && typeof access.canDelete === 'boolean'
     && typeof access.paymentRequired === 'boolean'
     && (access.canCheckout === undefined || typeof access.canCheckout === 'boolean')
-    && (access.canManageBilling === undefined || typeof access.canManageBilling === 'boolean');
+    && (access.canManageBilling === undefined || typeof access.canManageBilling === 'boolean')
+    && (access.dynamicEnabled === undefined || typeof access.dynamicEnabled === 'boolean')
+    && (access.canUseDynamic === undefined || typeof access.canUseDynamic === 'boolean')
+    && (access.databaseSubscribed === undefined || typeof access.databaseSubscribed === 'boolean')
+    && (access.databaseBillingAvailable === undefined || typeof access.databaseBillingAvailable === 'boolean');
 }
 
 function isDeployment(value: unknown): value is Deployment {
@@ -74,6 +84,7 @@ function isDeployment(value: unknown): value is Deployment {
     && (d.status === 'running' || d.status === 'ready' || d.status === 'failed' || d.status === 'deleting' || d.status === 'cleanup_failed')
     && (d.style === undefined || isSiteStyle(d.style))
     && (d.canEdit === undefined || typeof d.canEdit === 'boolean')
+    && (d.canData === undefined || typeof d.canData === 'boolean')
     && (d.lastUpdateError === undefined || typeof d.lastUpdateError === 'string')
     && (d.url === undefined || (typeof d.url === 'string' && /^https:\/\/[a-z0-9-]+\.cloudfront\.net$/.test(d.url)));
 }
@@ -128,6 +139,8 @@ export function App({ authenticatedSession, onSignOut, authError }: {
   const [items, setItems] = useState('');
   const [products, setProducts] = useState<ProductDraft[]>([newProduct(1)]);
   const [blocks, setBlocks] = useState<PageBlock[]>([]);
+  const [dynamic, setDynamic] = useState<DynamicConfig | undefined>();
+  const [dataTarget, setDataTarget] = useState<Deployment | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draftBusy, setDraftBusy] = useState(false);
   const [editorRevision, setEditorRevision] = useState(0);
@@ -167,6 +180,8 @@ export function App({ authenticatedSession, onSignOut, authError }: {
     setBillingLink(null);
     setProducts([newProduct(1)]);
     setBlocks([]);
+    setDynamic(undefined);
+    setDataTarget(null);
     setEditingId(null);
     setInbox(null);
     setDraftBusy(false);
@@ -230,7 +245,7 @@ export function App({ authenticatedSession, onSignOut, authError }: {
     }
     const submittedProducts: StoreProduct[] = [];
     if (template === 'builder') {
-      const error = blockError(blocks);
+      const error = dynamicError(dynamic) ?? blockError(blocks, dynamic?.collections);
       if (error) {
         setMessage({ text: error, error: true });
         return;
@@ -261,7 +276,7 @@ export function App({ authenticatedSession, onSignOut, authError }: {
       const result = await api<unknown>(editingId ? `/api/deployments/${editingId}/design` : '/api/deployments', authenticatedSession, {
         method: editingId ? 'PATCH' : 'POST', body: { name, region, template, style: siteStyle, businessName, listTitle, items,
           ...(usesProducts ? { products: submittedProducts } : {}),
-          ...(template === 'builder' ? { blocks } : {}) },
+          ...(template === 'builder' ? { blocks, ...(dynamic ? { dynamic } : {}) } : {}) },
       });
       if (version !== sessionVersion.current) return;
       if (!isDeployment(result)) throw new Error('The server returned an invalid deployment.');
@@ -288,6 +303,7 @@ export function App({ authenticatedSession, onSignOut, authError }: {
     setListTitle(design.listTitle);
     setItems(design.items);
     setBlocks(design.blocks);
+    setDynamic(design.dynamic);
     const savedProducts = design.draftProducts ?? design.products?.map(product => ({
       name: product.name, description: product.description, price: (product.priceCents / 100).toFixed(2), paymentLink: product.paymentLink,
     })) ?? [];
@@ -307,6 +323,7 @@ export function App({ authenticatedSession, onSignOut, authError }: {
         method: action === 'save' ? 'PUT' : action === 'delete' ? 'DELETE' : 'GET',
         ...(action === 'save' ? { body: { name, region, template: 'builder', style: siteStyle, businessName, listTitle, items, blocks,
           ...(editingId ? { draftDeploymentId: editingId } : {}),
+          ...(dynamic ? { dynamic } : {}),
           draftProducts: products.map(({ name, description, price, paymentLink }) => ({ name, description, price, paymentLink })) } } : {}),
       });
       if (version !== sessionVersion.current) return;
@@ -491,6 +508,7 @@ export function App({ authenticatedSession, onSignOut, authError }: {
         {!billingLink.portal && ' Access unlocks only after Stripe confirms payment, not when you return from checkout.'}
       </p>}
       {currentAccess?.role === 'viewer' && <p className="deployment-notice">Your role provides read-only deployment access.</p>}
+      {authenticatedSession && currentAccess?.role === 'customer_admin' && currentAccess.databaseBillingAvailable && <DatabaseBilling session={authenticatedSession} />}
       {currentAccess?.canCreate && !creating && <button type="button" className="secondary" disabled={draftBusy} onClick={() => void draftAction('load')}>Load saved builder draft</button>}
       {loadError && <p role="alert">{loadError}</p>}
       {visibleDeployments.length > 0 && <ul className="deployment-list">
@@ -500,6 +518,7 @@ export function App({ authenticatedSession, onSignOut, authError }: {
           {deployment.lastUpdateError && <small role="alert">{deployment.lastUpdateError}</small>}
           {deployment.canEdit && currentAccess?.canCreate && <button type="button" disabled={draftBusy || submitting} onClick={() => void editSite(deployment)}>Edit {deployment.name}</button>}
           {currentAccess?.canDelete && <button type="button" disabled={draftBusy} onClick={() => void loadInbox(deployment)}>Submissions for {deployment.name}</button>}
+          {deployment.canData && currentAccess?.canDelete && <button type="button" onClick={() => setDataTarget(deployment)}>Data for {deployment.name}</button>}
           {deployment.url && currentAccess && !currentAccess.paymentRequired &&
             <a href={deployment.url} target="_blank" rel="noreferrer">Open site</a>}
           {deployment.status === 'failed' && <small>Deployment failed. An operator must inspect the private Terraform log and state.</small>}
@@ -513,6 +532,7 @@ export function App({ authenticatedSession, onSignOut, authError }: {
             </button>}
         </li>)}
       </ul>}
+      {dataTarget && authenticatedSession && currentAccess?.canDelete && <DynamicAdmin key={`${authenticatedSession.actorId}-${dataTarget.id}`} deployment={dataTarget} session={authenticatedSession} onClose={() => setDataTarget(null)} />}
       {inbox && currentAccess?.canDelete && <section className="builder-inbox" aria-label={`Submissions for ${inbox.deployment.name}`}>
         <h3>Submissions for {inbox.deployment.name}</h3>
         <p>Private to your organization. Delete entries when no longer needed. This inbox does not send email automatically.</p>
@@ -611,7 +631,15 @@ export function App({ authenticatedSession, onSignOut, authError }: {
           <button type="button" className="secondary" disabled={draftBusy || submitting} onClick={() => void draftAction('delete')}>Delete saved draft</button>
           <p>One private draft per account and organization. Saving is explicit; unsaved changes are lost on reload.</p>
         </div>}
-        {template === 'builder' ? <SiteEditor key={`${editingId ?? 'new-design'}-${editorRevision}`} blocks={blocks} onChange={setBlocks} style={siteStyle} disabled={submitting || draftBusy} catalog={catalogPreview} /> : <div className="site-preview-block">
+        {template === 'builder' && <>
+          {!currentAccess?.dynamicEnabled && <p className="deployment-notice">Dynamic apps require the operator to configure a managed database and separate visitor identity pool. Static pages and drafts still work.</p>}
+          {currentAccess?.dynamicEnabled && !currentAccess.canUseDynamic && <p className="deployment-notice">Publishing dynamic apps requires the separate database add-on and an active Cookist plan.
+            {!currentAccess.databaseBillingAvailable ? ' The operator must configure database billing before authorization is available.' :
+              currentAccess.role === 'customer_admin' ? ' Manage your database billing above.' : ' Ask your organization administrator to authorize database billing.'}
+            {' Existing data remains available for reading and deletion.'}</p>}
+          <DynamicEditor key={`${editingId ?? 'new-design'}-${editorRevision}`} value={dynamic} onChange={setDynamic} disabled={submitting || draftBusy || !currentAccess?.canUseDynamic} editing={!!editingId} />
+        </>}
+        {template === 'builder' ? <SiteEditor key={`${editingId ?? 'new-design'}-${editorRevision}`} blocks={blocks} onChange={setBlocks} style={siteStyle} disabled={submitting || draftBusy} catalog={catalogPreview} dynamic={dynamic} /> : <div className="site-preview-block">
           <h4>Site preview</h4>
           <div className={`site-preview generated-site site-style-${siteStyle}`} role="region" aria-label="Site preview">
             <div className="site-content">
