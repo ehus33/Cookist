@@ -1,5 +1,12 @@
 # @cookist/web
 
+## 1.7.2
+
+### Patch Changes
+
+- a36ca84: Refresh the visual builder with a sticky left sidebar of square, labeled icon tiles. Keep element drag-and-drop, accessible click placement, and settings intact, with a compact tile grid on phones.
+- Give the visual builder a wider, taller center canvas by using the available desktop screen width and reducing surrounding padding. Preserve phone preview sizing, responsive controls, and published site layouts.
+
 ## 1.7.1
 
 ### Patch Changes

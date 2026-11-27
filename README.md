@@ -86,6 +86,9 @@ stock or mark orders paid. Existing blank/business deployments are not converted
 Choose **Visual builder** to open Cookist's Page studio. The left-hand Add elements
 sidebar has square icon tiles with visible labels; it stays within reach while
 scrolling on desktop and becomes a compact tile grid above the page on phones.
+The desktop editor uses the available screen width and a taller center canvas,
+with reduced outer padding. Phone preview remains capped at 390px; published
+site dimensions and non-builder screens are unchanged.
 Drag a **Heading**,
 **Text**, **Image**, **Button**, **Divider**, **Space**, or **Product catalog**
 from Add elements onto a marked drop zone. Drag an element's **Drag** handle
