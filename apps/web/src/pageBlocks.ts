@@ -1,4 +1,4 @@
-export type BlockType = 'heading' | 'text' | 'image' | 'button' | 'divider' | 'spacer' | 'products';
+export type BlockType = 'heading' | 'text' | 'image' | 'button' | 'divider' | 'spacer' | 'products' | 'contact' | 'waitlist';
 export type PageBlock = {
   id: string;
   type: BlockType;
@@ -18,11 +18,13 @@ export const blockTypes: { type: BlockType; label: string }[] = [
   { type: 'divider', label: 'Divider' },
   { type: 'spacer', label: 'Space' },
   { type: 'products', label: 'Product catalog' },
+  { type: 'contact', label: 'Contact form' },
+  { type: 'waitlist', label: 'Waitlist form' },
 ];
 
 export function newBlock(type: BlockType): PageBlock {
   return {
-    id: crypto.randomUUID(), type, text: type === 'heading' ? 'Your next big idea' : type === 'text'
+    id: crypto.randomUUID(), type, text: type === 'contact' ? 'Contact us' : type === 'waitlist' ? 'Join our waitlist' : type === 'heading' ? 'Your next big idea' : type === 'text'
       ? 'Tell your customers what makes you different.' : type === 'button' ? 'Learn more' : '',
     url: '', alt: '', align: 'left', size: 'medium',
   };
@@ -45,15 +47,29 @@ export function blockError(blocks: PageBlock[]): string | null {
     if (block.beside && (index === 0 || blocks[index - 1].beside)) {
       return 'A row can contain at most two elements.';
     }
-    if ((block.type === 'heading' || block.type === 'text' || block.type === 'button') && !block.text.trim()) {
+    if (['heading', 'text', 'button', 'contact', 'waitlist'].includes(block.type) && !block.text.trim()) {
       return `Element ${index + 1} needs text.`;
     }
+
     if ((block.type === 'button' || block.type === 'image') && !isSafeWebURL(block.url)) {
       return `Element ${index + 1} needs a complete HTTPS URL.`;
     }
     if (block.type === 'image' && !block.alt.trim()) return `Element ${index + 1} needs image alternative text.`;
   }
   return null;
+}
+
+export function isPageBlock(value: unknown): value is PageBlock {
+  if (!value || typeof value !== 'object') return false;
+  const block = value as Record<string, unknown>;
+  return typeof block.id === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(block.id)
+    && blockTypes.some(item => item.type === block.type)
+    && typeof block.text === 'string' && block.text.length <= 8000
+    && typeof block.url === 'string' && block.url.length <= 2000
+    && typeof block.alt === 'string' && block.alt.length <= 640
+    && (block.align === 'left' || block.align === 'center' || block.align === 'right')
+    && (block.size === 'small' || block.size === 'medium' || block.size === 'large')
+    && (block.beside === undefined || typeof block.beside === 'boolean');
 }
 
 export function moveBlock(blocks: PageBlock[], id: string, beforeIndex: number): PageBlock[] {

@@ -53,7 +53,7 @@ func validatePageBlocks(blocks []pageBlock) error {
 		}
 		ids[block.ID] = true
 		switch block.Type {
-		case "heading", "text", "button":
+		case "heading", "text", "button", "contact", "waitlist":
 			if strings.TrimSpace(block.Text) == "" || (block.Type != "text" && len(block.Text) > 320) {
 				return fmt.Errorf("Element %d requires text within the allowed length.", i+1)
 			}
@@ -87,6 +87,10 @@ func hasProductCatalog(blocks []pageBlock) bool {
 }
 
 func renderPageBlocks(blocks []pageBlock, catalog string) string {
+	return renderPageBlocksWithForms(blocks, catalog, "")
+}
+
+func renderPageBlocksWithForms(blocks []pageBlock, catalog, formBase string) string {
 	var content strings.Builder
 	content.WriteString("<main>")
 	for i, block := range blocks {
@@ -115,6 +119,13 @@ func renderPageBlocks(blocks []pageBlock, catalog string) string {
 			content.WriteString(`<div class="page-spacer" aria-hidden="true"></div>`)
 		case "products":
 			content.WriteString(catalog)
+		case "contact", "waitlist":
+			fmt.Fprintf(&content, `<form class="lead-form" method="post" action="%s/%s"><h2>%s</h2><label>Name<input name="name" maxlength="160" autocomplete="name" required></label><label>Email<input type="email" name="email" maxlength="254" autocomplete="email" required></label>`,
+				html.EscapeString(formBase), html.EscapeString(block.ID), text)
+			if block.Type == "contact" {
+				content.WriteString(`<label>Message<textarea name="message" maxlength="2000" rows="4" required></textarea></label>`)
+			}
+			content.WriteString(`<label class="lead-honeypot" aria-hidden="true">Leave empty<input name="website" tabindex="-1" autocomplete="off"></label><label class="lead-consent"><input type="checkbox" name="consent" value="yes" required>I agree this business may contact me about my request.</label><button class="page-button" type="submit">` + map[bool]string{true: "Join waitlist", false: "Send message"}[block.Type == "waitlist"] + `</button></form>`)
 		}
 		content.WriteString("</div>")
 		if i+1 == len(blocks) || !blocks[i+1].Beside {

@@ -2,6 +2,8 @@ import { Fragment, useRef, useState } from 'react';
 import type { DragEvent, ReactNode } from 'react';
 import { blockRows, blockTypes, insertBlock, isSafeWebURL, moveBlock, newBlock, placeBeside, removeBlock, splitRow } from './pageBlocks';
 import type { BlockType, PageBlock } from './pageBlocks';
+import { newStartupSection, startupSections } from './startupSections';
+import type { StartupSectionId } from './startupSections';
 
 const dragFormat = 'application/x-cookist-element';
 const elementIcons: Record<BlockType, ReactNode> = {
@@ -12,6 +14,8 @@ const elementIcons: Record<BlockType, ReactNode> = {
   divider: <><path d="M3 12h18" /><path d="M5 5h14M5 19h14" strokeDasharray="2 3" /></>,
   spacer: <path d="M4 3h16M4 21h16M12 6v12m-3-9 3-3 3 3m-6 6 3 3 3-3" />,
   products: <><path d="M5 7h14l2 14H3L5 7Z" /><path d="M8 9V6a4 4 0 0 1 8 0v3" /></>,
+  contact: <><rect x="3" y="5" width="18" height="14" rx="2" /><path d="m3 6 9 7 9-7" /></>,
+  waitlist: <><path d="M5 5h9M5 10h9M5 15h5M18 12v8m-4-4h8" /></>,
 };
 
 export function SiteEditor({ blocks, onChange, style, disabled, catalog }: {
@@ -51,6 +55,16 @@ export function SiteEditor({ blocks, onChange, style, disabled, catalog }: {
     if (next === blocks) return;
     commit(next, `${blockTypes.find(item => item.type === type)?.label} added at position ${index + 1}.`);
     setSelectedId(block.id);
+  }
+
+  function addSection(id: StartupSectionId) {
+    const section = newStartupSection(id);
+    if (disabled || blocks.length + section.length > 40) {
+      setAnnouncement('This section would exceed the 40-element limit. Remove elements first.');
+      return;
+    }
+    commit([...blocks, ...section], `${startupSections.find(item => item.id === id)?.label} section added. Edit its copy and button destinations before publishing.`);
+    setSelectedId(section[0].id);
   }
 
   function startDrag(event: DragEvent, value: { type?: BlockType; id?: string }) {
@@ -107,6 +121,15 @@ export function SiteEditor({ blocks, onChange, style, disabled, catalog }: {
       case 'divider': return <hr />;
       case 'spacer': return <div className="page-spacer" aria-label="Space" />;
       case 'products': return catalog;
+      case 'contact':
+      case 'waitlist': return <div className="lead-form">
+        <h2>{block.text}</h2>
+        <label>Name<input disabled placeholder="Visitor name" /></label>
+        <label>Email<input disabled placeholder="visitor@example.com" /></label>
+        {block.type === 'contact' && <label>Message<textarea disabled rows={3} /></label>}
+        <p>Visitors give contact consent. Submissions appear in this site's private inbox after publishing.</p>
+        <button type="button" className="page-button" disabled>{block.type === 'waitlist' ? 'Join waitlist' : 'Send message'}</button>
+      </div>;
     }
   }
 
@@ -121,7 +144,7 @@ export function SiteEditor({ blocks, onChange, style, disabled, catalog }: {
       </div>
     </div>
     <p>Drag elements above, below, or to the left/right of a single element. Each row holds up to two elements of any type.
-      On phones, paired elements stack. Use Add placement or Place beside previous without dragging. Changes publish with this new deployment.</p>
+      On phones, paired elements stack. Use Add placement or Place beside previous without dragging. Save a draft to keep your work; use the deployment form to publish changes.</p>
     <div className={`builder-layout${preview ? ' is-preview' : ''}`}>
       {!preview && <aside className="builder-palette" aria-label="Add elements">
         <h5>Add elements</h5>
@@ -145,6 +168,11 @@ export function SiteEditor({ blocks, onChange, style, disabled, catalog }: {
           <option value="left" disabled={!canInsertBeside}>Left of selected</option>
           <option value="right" disabled={!canInsertBeside}>Right of selected</option>
         </select></label>
+        <h5>Startup sections</h5>
+        <div className="builder-section-presets">
+          {startupSections.map(item => <button key={item.id} type="button" className="secondary" disabled={disabled}
+            onClick={() => addSection(item.id)} aria-label={`Add ${item.label} section`}>{item.label}</button>)}
+        </div>
       </aside>}
       <div className="builder-stage">
         <div className={`builder-canvas generated-site site-style-${style}${mobile ? ' phone-preview' : ''}`}
@@ -194,7 +222,7 @@ export function SiteEditor({ blocks, onChange, style, disabled, catalog }: {
         <h5>Element settings</h5>
         {!selected ? <p>Select an element on the page.</p> : <fieldset disabled={disabled}>
           <legend>{blockTypes.find(item => item.type === selected.type)?.label}</legend>
-          {['heading', 'text', 'button'].includes(selected.type) && <label>Element text<textarea rows={4} maxLength={selected.type === 'text' ? 2000 : 80}
+          {['heading', 'text', 'button', 'contact', 'waitlist'].includes(selected.type) && <label>Element text<textarea rows={4} maxLength={selected.type === 'text' ? 2000 : 80}
             value={selected.text} onChange={event => change('text', event.target.value)} /></label>}
           {(selected.type === 'image' || selected.type === 'button') && <label>{selected.type === 'image' ? 'Image URL' : 'Button URL'}<input type="url" maxLength={2000}
             placeholder="https://..." value={selected.url} onChange={event => change('url', event.target.value)} /></label>}

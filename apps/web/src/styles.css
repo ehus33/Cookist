@@ -80,9 +80,14 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px
 .builder-layout.is-preview { grid-template-columns: minmax(0, 1fr); }
 .builder-palette, .builder-properties { display: grid; gap: 10px; min-width: 0; padding: 12px; background: #f5f5f0; border-radius: 8px; }
 .builder-layout h5 { margin: 0; font-size: 1rem; }
-.builder-palette { position: sticky; top: 16px; max-height: calc(100dvh - 32px); overflow-y: auto; background: #30383f; color: #f4f7f9; }
+.builder-palette { position: sticky; top: 16px; max-height: min(640px, calc(100dvh - 32px)); overflow-y: auto; background: #30383f; color: #f4f7f9; }
 .builder-palette-hint { font-size: .75rem; line-height: 1.5; color: #c5ced5; }
 .builder-palette-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.builder-section-presets { display: grid; gap: 6px; }
+.builder-section-presets button { font-size: .75rem; text-align: left; }
+.builder-draft-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.builder-inbox { display: grid; gap: 12px; }
+.builder-inbox li { overflow-wrap: anywhere; }
 .workspace .builder-palette-tile {
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
   aspect-ratio: 1; min-width: 0; padding: 6px; border: 1px solid #65717b; border-radius: 6px;
