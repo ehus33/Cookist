@@ -27,11 +27,11 @@ vi.mock('oidc-client-ts', () => ({
   },
   WebStorageStateStore: class {},
 }));
-vi.mock('./api', () => ({
+vi.mock('../../shared/api', () => ({
   api: mocks.api,
   errorMessage: (error: unknown) => error instanceof Error ? error.message : 'Unexpected error',
 }));
-vi.mock('./App', () => ({
+vi.mock('../../app/App', () => ({
   App: ({ authenticatedSession, onSignOut, authError }: {
     authenticatedSession?: { actorId: string }; onSignOut?: () => void; authError?: string;
   }) => <div>

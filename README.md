@@ -26,6 +26,18 @@ configured; complete the logging and monitoring requirements below before
 real-user or production use. Site provisioning must be tested separately:
 configuration checks do not create a site or prove a full Terraform apply.
 
+## Source layout
+
+- [App](apps/web/src/app/): application screen and its integration tests.
+- [Authentication](apps/web/src/features/auth/): Cognito sign-in and session handling.
+- [Builder](apps/web/src/features/builder/): visual editor, page blocks and startup sections.
+- [Shared](apps/web/src/shared/): API helpers, domain validation and shared types.
+- [Gateway assets](services/gateway/assets/): styles shared by previews and generated sites.
+
+Feature tests live alongside their source. Gateway Go files stay in one directory
+because they share a package; Terraform modules remain in its `terraform/` folder.
+Root manifests, environment configuration and runtime data stay in their existing locations.
+
 ## Run on Windows
 
 Requires Node.js 22.12+ (or 24+), Yarn 1.22.22, JDK 17, and Go 1.24+. Run:
