@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react';
 import { UserManager, WebStorageStateStore } from 'oidc-client-ts';
 import type { User } from 'oidc-client-ts';
-import { App } from './App';
-import { api, errorMessage } from './api';
-import { isSession } from './domain';
-import type { Session } from './types';
+import { App } from '../../app/App';
+import { api, errorMessage } from '../../shared/api';
+import { isSession } from '../../shared/domain';
+import type { Session } from '../../shared/types';
 
 type Settings = { issuer: string; clientId: string; domain: string };
 let callback: Promise<User> | undefined;

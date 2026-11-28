@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { App } from './App';
-import * as apiModule from './api';
+import * as apiModule from '../shared/api';
 
 const session = { token: 'test-token', actorId: 'owner' };
 const ownerAccess = { role: 'platform_owner', subscribed: true, paymentRequired: false, canList: true, canCreate: true, canDelete: true };

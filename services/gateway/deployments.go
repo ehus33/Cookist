@@ -89,7 +89,7 @@ var paymentLinkPattern = regexp.MustCompile(`^https://buy\.stripe\.com/(?:test_)
 //go:embed terraform/site/*.tf terraform/site/.terraform.lock.hcl
 var siteTerraform embed.FS
 
-//go:embed site_styles.css
+//go:embed assets/site_styles.css
 var siteStylesCSS string
 
 var siteFaviconURL = "data:image/svg+xml," + url.PathEscape(

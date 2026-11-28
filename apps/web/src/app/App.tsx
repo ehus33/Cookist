@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
-import { api, errorMessage } from './api';
-import type { Session } from './types';
-import { SiteEditor } from './SiteEditor';
-import { blockError, isPageBlock } from './pageBlocks';
-import type { PageBlock } from './pageBlocks';
-import '../../../services/gateway/site_styles.css';
+import { api, errorMessage } from '../shared/api';
+import type { Session } from '../shared/types';
+import { SiteEditor } from '../features/builder/SiteEditor';
+import { blockError, isPageBlock } from '../features/builder/pageBlocks';
+import type { PageBlock } from '../features/builder/pageBlocks';
+import '../../../../services/gateway/assets/site_styles.css';
 
 type DeploymentTemplate = 'blank' | 'business' | 'storefront' | 'builder';
 type ProductDraft = { id: number; name: string; description: string; price: string; paymentLink: string };
