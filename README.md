@@ -54,6 +54,19 @@ do not commit populated secrets.
 For containers, run `docker compose up --build` and open
 http://localhost:8080. The gateway binds to loopback.
 
+## Continuous integration
+
+[CI](.github/workflows/ci.yml) runs on pushes, pull requests and manual dispatch.
+It tests and builds the frontend with Node 24 and Yarn 1.22.22, tests/vets/builds
+the Go gateway, and then builds the gateway container to check its packaging.
+Actions are pinned to release commits and have read-only repository permissions.
+
+This workflow does **not** deploy, publish images, use AWS credentials or enable
+live billing. The container build uses the Dockerfile's demo-auth default and is
+only a packaging check, not a production deployment artifact. Restoring the
+newer dynamic-app and actual-cost billing source remains a separate deployment
+prerequisite.
+
 ## Managed Terraform deployments
 
 When enabled, **New deployment** starts a background Terraform apply for a
